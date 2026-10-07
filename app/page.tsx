@@ -62,12 +62,12 @@ type SavedPlan = {
   created_at: string;
 };
 
-function getErrorMessage(value: unknown): string {
-  if (value instanceof Error) return value.message;
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error) return error.message;
   return "Ein unbekannter Fehler ist aufgetreten.";
 }
 
-function formatDate(dateString: string): string {
+function formatDate(dateString: string) {
   return new Intl.DateTimeFormat("de-DE", {
     day: "2-digit",
     month: "2-digit",
@@ -77,8 +77,8 @@ function formatDate(dateString: string): string {
   }).format(new Date(dateString));
 }
 
-function isSessionPlan(value: SessionPlan | HomeWorkout): value is SessionPlan {
-  return "phases" in value;
+function isSessionPlan(plan: SessionPlan | HomeWorkout): plan is SessionPlan {
+  return "phases" in plan;
 }
 
 export default function HomePage() {
@@ -123,21 +123,20 @@ export default function HomePage() {
   const [saveLoading, setSaveLoading] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  const [activeSavedPlan, setActiveSavedPlan] = useState<SavedPlan | null>(null);
   const [deleteLoadingId, setDeleteLoadingId] = useState<string | null>(null);
 
   const isSessionTab = tab === "session";
   const isSavedTab = tab === "saved";
 
   useEffect(() => {
-    let active = true;
+    let mounted = true;
 
-    async function loadUser() {
+    async function loadAuthenticatedUser() {
       const {
         data: { user },
       } = await supabase.auth.getUser();
 
-      if (!active) return;
+      if (!mounted) return;
 
       if (!user) {
         router.replace("/login");
@@ -149,7 +148,7 @@ export default function HomePage() {
       setAuthLoading(false);
     }
 
-    loadUser();
+    void loadAuthenticatedUser();
 
     const {
       data: { subscription },
@@ -165,7 +164,7 @@ export default function HomePage() {
     });
 
     return () => {
-      active = false;
+      mounted = false;
       subscription.unsubscribe();
     };
   }, [router, supabase]);
@@ -228,7 +227,6 @@ export default function HomePage() {
       }
 
       setSessionPlan(json.data as SessionPlan);
-      setActiveSavedPlan(null);
     } catch (error) {
       setSessionError(getErrorMessage(error));
     } finally {
@@ -262,7 +260,6 @@ export default function HomePage() {
       }
 
       setHomeWorkout(json.data as HomeWorkout);
-      setActiveSavedPlan(null);
     } catch (error) {
       setHomeError(getErrorMessage(error));
     } finally {
@@ -282,13 +279,12 @@ export default function HomePage() {
 
   async function saveCurrentPlan() {
     const plan = isSessionTab ? sessionPlan : homeWorkout;
+    const title = saveTitle.trim();
 
     if (!userId || !plan) {
-      setSaveError("Bitte erstelle zuerst einen Trainingsplan.");
+      setSaveError("Bitte erstelle zuerst einen Plan.");
       return;
     }
-
-    const title = saveTitle.trim();
 
     if (!title) {
       setSaveError("Bitte gib einen Namen für den Plan ein.");
@@ -327,6 +323,7 @@ export default function HomePage() {
     if (!confirmed) return;
 
     setDeleteLoadingId(planId);
+    setSavedPlansError(null);
 
     const { error } = await supabase
       .from("training_plans")
@@ -340,21 +337,15 @@ export default function HomePage() {
     }
 
     setSavedPlans((current) => current.filter((plan) => plan.id !== planId));
-
-    if (activeSavedPlan?.id === planId) {
-      setActiveSavedPlan(null);
-    }
-
     setDeleteLoadingId(null);
   }
 
   function openSavedPlan(plan: SavedPlan) {
-    setActiveSavedPlan(plan);
-
     if (plan.plan_type === "team" && isSessionPlan(plan.plan_data)) {
       setSessionPlan(plan.plan_data);
       setSessionFocus(plan.focus);
       setTab("session");
+      return;
     }
 
     if (plan.plan_type === "home" && !isSessionPlan(plan.plan_data)) {
@@ -398,6 +389,10 @@ export default function HomePage() {
         </div>
 
         <div className="topbar-actions">
+          <a className="status-pill link-pill" href="/teams">
+            Teams
+          </a>
+
           {userEmail && (
             <span className="user-email" title={userEmail}>
               {userEmail}
@@ -433,7 +428,6 @@ export default function HomePage() {
           type="button"
           className={`tab ${tab === "session" ? "active" : ""}`}
           onClick={() => setTab("session")}
-          aria-pressed={tab === "session"}
         >
           <span className="tab-icon" aria-hidden="true">
             ⚽
@@ -450,7 +444,6 @@ export default function HomePage() {
           type="button"
           className={`tab ${tab === "home" ? "active" : ""}`}
           onClick={() => setTab("home")}
-          aria-pressed={tab === "home"}
         >
           <span className="tab-icon" aria-hidden="true">
             ⌂
@@ -467,7 +460,6 @@ export default function HomePage() {
           type="button"
           className={`tab ${tab === "saved" ? "active" : ""}`}
           onClick={() => setTab("saved")}
-          aria-pressed={tab === "saved"}
         >
           <span className="tab-icon" aria-hidden="true">
             ▣
@@ -514,18 +506,22 @@ export default function HomePage() {
             </div>
           )}
 
-          {!savedPlansLoading && !savedPlansError && savedPlans.length === 0 && (
-            <div className="saved-empty">
-              <div className="empty-icon" aria-hidden="true">
-                ▣
+          {!savedPlansLoading &&
+            !savedPlansError &&
+            savedPlans.length === 0 && (
+              <div className="saved-empty">
+                <div>
+                  <div className="empty-icon" aria-hidden="true">
+                    ▣
+                  </div>
+                  <h3>Noch keine gespeicherten Pläne</h3>
+                  <p>
+                    Generiere einen Trainingsplan oder ein Home-Workout und
+                    speichere ihn anschließend hier.
+                  </p>
+                </div>
               </div>
-              <h3>Noch keine gespeicherten Pläne</h3>
-              <p>
-                Generiere einen Trainingsplan oder ein Home-Workout und speichere
-                ihn anschließend hier.
-              </p>
-            </div>
-          )}
+            )}
 
           {!savedPlansLoading && savedPlans.length > 0 && (
             <div className="saved-plan-grid">
@@ -533,9 +529,13 @@ export default function HomePage() {
                 <article className="saved-plan-card" key={plan.id}>
                   <div className="saved-card-top">
                     <span className="saved-type">
-                      {plan.plan_type === "team" ? "TEAMTRAINING" : "HOME-WORKOUT"}
+                      {plan.plan_type === "team"
+                        ? "TEAMTRAINING"
+                        : "HOME-WORKOUT"}
                     </span>
-                    <span className="saved-date">{formatDate(plan.created_at)}</span>
+                    <span className="saved-date">
+                      {formatDate(plan.created_at)}
+                    </span>
                   </div>
 
                   <h3>{plan.title}</h3>
@@ -1016,6 +1016,7 @@ function PlanView({
                         {exercise.duration_min} Min
                       </span>
                     </div>
+
                     <p>
                       <strong>Ziel:</strong> {exercise.objective}
                     </p>
@@ -1079,6 +1080,7 @@ function PlanView({
                           : exercise.sets_reps || "Übung"}
                       </span>
                     </div>
+
                     <p>
                       <strong>Ziel:</strong> {exercise.objective}
                     </p>

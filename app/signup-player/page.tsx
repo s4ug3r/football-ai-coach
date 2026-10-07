@@ -59,7 +59,7 @@ function SignUpPlayerContent() {
       .maybeSingle();
 
     if (invitationError) {
-      setError(`Einladung konnte nicht geladen werden: ${invitationError.message}`);
+      setError("Die Einladung konnte nicht geladen werden.");
       setPageLoading(false);
       return;
     }
@@ -93,13 +93,7 @@ function SignUpPlayerContent() {
       .eq("id", loadedInvitation.team_id)
       .maybeSingle();
 
-    if (teamError) {
-      setError(`Team konnte nicht geladen werden: ${teamError.message}`);
-      setPageLoading(false);
-      return;
-    }
-
-    if (!teamData) {
+    if (teamError || !teamData) {
       setError("Das Team zu dieser Einladung wurde nicht gefunden.");
       setPageLoading(false);
       return;
@@ -120,8 +114,10 @@ function SignUpPlayerContent() {
       return;
     }
 
-    if (!fullName.trim() || !email.trim() || !password) {
-      setError("Bitte fülle alle Felder aus.");
+    if (!fullName.trim() || !email.trim() || password.length < 8) {
+      setError(
+        "Bitte gib deinen Namen, eine gültige E-Mail-Adresse und ein Passwort mit mindestens 8 Zeichen ein."
+      );
       return;
     }
 
@@ -136,6 +132,9 @@ function SignUpPlayerContent() {
           data: {
             full_name: fullName.trim(),
             role: "player",
+            invitation_id: invitationId,
+            invited_team_id: invitation.team_id,
+            invited_by: invitation.created_by,
           },
         },
       });
@@ -144,64 +143,10 @@ function SignUpPlayerContent() {
         throw authError;
       }
 
-      const playerAuthUserId = authData.user?.id;
-
-      if (!playerAuthUserId) {
+      if (!authData.user?.id) {
         throw new Error(
           "Der Spieler-Account konnte nicht erstellt werden. Bitte versuche es später erneut."
         );
-      }
-
-      const { data: freshInvitation, error: freshInvitationError } =
-        await supabase
-          .from("team_invitations")
-          .select("id, team_id, created_by, used, expires_at")
-          .eq("id", invitationId)
-          .maybeSingle();
-
-      if (freshInvitationError || !freshInvitation) {
-        throw new Error(
-          "Die Einladung konnte nach der Registrierung nicht mehr geprüft werden."
-        );
-      }
-
-      const checkedInvitation = freshInvitation as Invitation;
-
-      if (checkedInvitation.used) {
-        throw new Error("Diese Einladung wurde inzwischen bereits verwendet.");
-      }
-
-      if (
-        checkedInvitation.expires_at &&
-        new Date(checkedInvitation.expires_at) <= new Date()
-      ) {
-        throw new Error("Diese Einladung ist inzwischen abgelaufen.");
-      }
-
-      const { error: playerError } = await supabase.from("players").insert({
-        coach_id: checkedInvitation.created_by,
-        team_id: checkedInvitation.team_id,
-        full_name: fullName.trim(),
-        position: null,
-        shirt_number: null,
-      });
-
-      if (playerError) {
-        throw playerError;
-      }
-
-      const { error: updateInvitationError } = await supabase
-        .from("team_invitations")
-        .update({
-          used: true,
-          used_by: playerAuthUserId,
-          used_at: new Date().toISOString(),
-        })
-        .eq("id", invitationId)
-        .eq("used", false);
-
-      if (updateInvitationError) {
-        throw updateInvitationError;
       }
 
       setSuccess(true);
@@ -209,7 +154,7 @@ function SignUpPlayerContent() {
       setError(
         err instanceof Error
           ? err.message
-          : "Die Spieler-Registrierung konnte nicht abgeschlossen werden."
+          : "Der Spieler-Account konnte nicht erstellt werden."
       );
     } finally {
       setLoading(false);
@@ -243,10 +188,15 @@ function SignUpPlayerContent() {
 
           <p className="eyebrow">Spieler-Account erstellt</p>
           <h1>Fast geschafft!</h1>
+
           <p className="auth-intro">
-            Dein Account wurde erstellt. Bitte bestätige jetzt deine
+            Dein Spieler-Account wurde erstellt. Bitte bestätige jetzt deine
             E-Mail-Adresse über den Link in deinem Postfach. Danach kannst du
-            dich einloggen und deine Workouts sehen.
+            dich einloggen.
+          </p>
+
+          <p className="auth-footnote">
+            Team: <strong>{teamName}</strong>
           </p>
 
           <button
@@ -282,7 +232,7 @@ function SignUpPlayerContent() {
         {invitationIsValid ? (
           <p className="auth-intro">
             Du wurdest eingeladen, dem Team <strong>{teamName}</strong>{" "}
-            beizutreten. Erstelle deinen Spieler-Account.
+            beizutreten. Erstelle jetzt deinen Spieler-Account.
           </p>
         ) : (
           <p className="auth-intro">

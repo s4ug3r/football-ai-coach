@@ -15,5 +15,7 @@
     "typescript": "5.7.3",
     "@types/react": "19.0.0",
     "@types/node": "22.13.10"
+    "@supabase/ssr": "^0.7.0",
+    "@supabase/supabase-js": "^2.49.1",
   }
 }

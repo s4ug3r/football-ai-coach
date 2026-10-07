@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "../../lib/supabase/client";
 
@@ -19,19 +19,24 @@ type Player = {
   full_name: string;
   position: string | null;
   shirt_number: number | null;
-  created_at: string;
 };
 
-const POSITIONS = [
-  "Torwart",
-  "Innenverteidigung",
-  "Außenverteidigung",
-  "Defensives Mittelfeld",
-  "Zentrales Mittelfeld",
-  "Offensives Mittelfeld",
-  "Flügel",
-  "Sturm",
-];
+type Invitation = {
+  id: string;
+  team_id: string;
+  created_by: string;
+  created_at: string;
+  expires_at: string | null;
+  used: boolean;
+};
+
+function formatDate(dateString: string) {
+  return new Intl.DateTimeFormat("de-DE", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).format(new Date(dateString));
+}
 
 export default function TeamsPage() {
   const router = useRouter();
@@ -39,33 +44,35 @@ export default function TeamsPage() {
 
   const [authLoading, setAuthLoading] = useState(true);
   const [userId, setUserId] = useState<string | null>(null);
+
   const [teams, setTeams] = useState<Team[]>([]);
-  const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
   const [players, setPlayers] = useState<Player[]>([]);
+  const [invitations, setInvitations] = useState<Invitation[]>([]);
 
-  const [teamName, setTeamName] = useState("");
-  const [ageGroup, setAgeGroup] = useState("U15");
-  const [playerName, setPlayerName] = useState("");
-  const [playerPosition, setPlayerPosition] = useState("Sturm");
-  const [shirtNumber, setShirtNumber] = useState("");
-
-  const [teamsLoading, setTeamsLoading] = useState(false);
-  const [playersLoading, setPlayersLoading] = useState(false);
-  const [teamSaving, setTeamSaving] = useState(false);
-  const [playerSaving, setPlayerSaving] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const selectedTeam = teams.find((team) => team.id === selectedTeamId) ?? null;
+  const [newTeamName, setNewTeamName] = useState("");
+  const [newTeamAgeGroup, setNewTeamAgeGroup] = useState("");
+
+  const [newPlayerFullName, setNewPlayerFullName] = useState("");
+  const [newPlayerPosition, setNewPlayerPosition] = useState("");
+  const [newPlayerShirtNumber, setNewPlayerShirtNumber] = useState("");
+  const [selectedTeamId, setSelectedTeamId] = useState("");
+
+  const [showInviteModal, setShowInviteModal] = useState(false);
+  const [selectedTeamForInvite, setSelectedTeamForInvite] = useState<Team | null>(null);
+  const [invitationLink, setInvitationLink] = useState("");
 
   useEffect(() => {
-    let active = true;
+    let mounted = true;
 
-    async function initialize() {
+    async function loadAuthenticatedUser() {
       const {
         data: { user },
       } = await supabase.auth.getUser();
 
-      if (!active) return;
+      if (!mounted) return;
 
       if (!user) {
         router.replace("/login");
@@ -74,196 +81,158 @@ export default function TeamsPage() {
 
       setUserId(user.id);
       setAuthLoading(false);
-      await loadTeams();
     }
 
-    void initialize();
+    void loadAuthenticatedUser();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!session?.user) {
+        router.replace("/login");
+        return;
+      }
+
+      setUserId(session.user.id);
+      setAuthLoading(false);
+    });
 
     return () => {
-      active = false;
+      mounted = false;
+      subscription.unsubscribe();
     };
   }, [router, supabase]);
 
   useEffect(() => {
-    if (selectedTeamId) {
-      void loadPlayers(selectedTeamId);
-    } else {
-      setPlayers([]);
+    if (userId) {
+      void loadData();
     }
-  }, [selectedTeamId]);
+  }, [userId]);
 
-  async function loadTeams() {
-    setTeamsLoading(true);
+  async function loadData() {
+    if (!userId) return;
+
+    setLoading(true);
     setError(null);
 
-    const { data, error: loadError } = await supabase
-      .from("teams")
-      .select("*")
-      .order("created_at", { ascending: true });
+    const [teamsResult, playersResult, invitationsResult] = await Promise.all([
+      supabase
+        .from("teams")
+        .select("id, coach_id, name, age_group, created_at")
+        .eq("coach_id", userId)
+        .order("created_at", { ascending: true }),
+      supabase
+        .from("players")
+        .select("id, team_id, coach_id, full_name, position, shirt_number")
+        .eq("coach_id", userId)
+        .order("shirt_number", { ascending: true }),
+      supabase
+        .from("team_invitations")
+        .select("id, team_id, created_by, created_at, expires_at, used")
+        .eq("created_by", userId)
+        .order("created_at", { ascending: false }),
+    ]);
 
-    if (loadError) {
-      setError(loadError.message);
-      setTeamsLoading(false);
+    if (teamsResult.error) {
+      setError(teamsResult.error.message);
+      setLoading(false);
       return;
     }
 
-    const loadedTeams = (data ?? []) as Team[];
-    setTeams(loadedTeams);
-
-    if (!selectedTeamId && loadedTeams.length > 0) {
-      setSelectedTeamId(loadedTeams[0].id);
-    }
-
-    setTeamsLoading(false);
-  }
-
-  async function loadPlayers(teamId: string) {
-    setPlayersLoading(true);
-    setError(null);
-
-    const { data, error: loadError } = await supabase
-      .from("players")
-      .select("*")
-      .eq("team_id", teamId)
-      .order("shirt_number", { ascending: true });
-
-    if (loadError) {
-      setError(loadError.message);
-      setPlayersLoading(false);
+    if (playersResult.error) {
+      setError(playersResult.error.message);
+      setLoading(false);
       return;
     }
 
-    setPlayers((data ?? []) as Player[]);
-    setPlayersLoading(false);
+    if (invitationsResult.error) {
+      setError(invitationsResult.error.message);
+      setLoading(false);
+      return;
+    }
+
+    setTeams((teamsResult.data ?? []) as Team[]);
+    setPlayers((playersResult.data ?? []) as Player[]);
+    setInvitations((invitationsResult.data ?? []) as Invitation[]);
+    setLoading(false);
   }
 
-  async function createTeam(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function createTeam() {
+    if (!userId || !newTeamName.trim()) return;
 
-    if (!userId || !teamName.trim()) return;
+    const { error } = await supabase.from("teams").insert({
+      coach_id: userId,
+      name: newTeamName.trim(),
+      age_group: newTeamAgeGroup.trim() || null,
+    });
 
-    setTeamSaving(true);
-    setError(null);
+    if (error) {
+      setError(error.message);
+      return;
+    }
 
-    const { data, error: insertError } = await supabase
-      .from("teams")
+    setNewTeamName("");
+    setNewTeamAgeGroup("");
+    await loadData();
+  }
+
+  async function createPlayer() {
+    if (!userId || !selectedTeamId || !newPlayerFullName.trim()) return;
+
+    const { error } = await supabase.from("players").insert({
+      coach_id: userId,
+      team_id: selectedTeamId,
+      full_name: newPlayerFullName.trim(),
+      position: newPlayerPosition.trim() || null,
+      shirt_number: newPlayerShirtNumber ? Number(newPlayerShirtNumber) : null,
+    });
+
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    setNewPlayerFullName("");
+    setNewPlayerPosition("");
+    setNewPlayerShirtNumber("");
+    await loadData();
+  }
+
+  async function createInvitation(team: Team) {
+    if (!userId) return;
+
+    const { data, error } = await supabase
+      .from("team_invitations")
       .insert({
-        coach_id: userId,
-        name: teamName.trim(),
-        age_group: ageGroup.trim() || null,
+        team_id: team.id,
+        created_by: userId,
+        expires_at: null,
       })
       .select()
       .single();
 
-    if (insertError) {
-      setError(insertError.message);
-      setTeamSaving(false);
+    if (error) {
+      setError(error.message);
       return;
     }
 
-    const newTeam = data as Team;
-    setTeams((current) => [...current, newTeam]);
-    setSelectedTeamId(newTeam.id);
-    setTeamName("");
-    setAgeGroup("U15");
-    setTeamSaving(false);
+    const invitationId = (data as Invitation).id;
+    const baseUrl = window.location.origin;
+    const link = `${baseUrl}/signup?invite=${invitationId}`;
+
+    setInvitationLink(link);
+    setSelectedTeamForInvite(team);
+    setShowInviteModal(true);
+    await loadData();
   }
 
-  async function deleteTeam(teamId: string) {
-    const team = teams.find((item) => item.id === teamId);
-
-    const confirmed = window.confirm(
-      `Team "${team?.name ?? "dieses Team"}" inklusive aller Spieler löschen?`
-    );
-
-    if (!confirmed) return;
-
-    setError(null);
-
-    const { error: deleteError } = await supabase
-      .from("teams")
-      .delete()
-      .eq("id", teamId);
-
-    if (deleteError) {
-      setError(deleteError.message);
-      return;
+  async function copyInvitationLink() {
+    try {
+      await navigator.clipboard.writeText(invitationLink);
+      alert("Link kopiert!");
+    } catch {
+      alert("Link konnte nicht kopiert werden.");
     }
-
-    const remainingTeams = teams.filter((team) => team.id !== teamId);
-    setTeams(remainingTeams);
-    setSelectedTeamId(remainingTeams[0]?.id ?? null);
-    setPlayers([]);
-  }
-
-  async function createPlayer(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
-    if (!userId || !selectedTeamId || !playerName.trim()) return;
-
-    setPlayerSaving(true);
-    setError(null);
-
-    const parsedNumber = shirtNumber.trim()
-      ? Number.parseInt(shirtNumber, 10)
-      : null;
-
-    const { data, error: insertError } = await supabase
-      .from("players")
-      .insert({
-        team_id: selectedTeamId,
-        coach_id: userId,
-        full_name: playerName.trim(),
-        position: playerPosition || null,
-        shirt_number:
-          parsedNumber !== null && Number.isFinite(parsedNumber)
-            ? parsedNumber
-            : null,
-      })
-      .select()
-      .single();
-
-    if (insertError) {
-      setError(insertError.message);
-      setPlayerSaving(false);
-      return;
-    }
-
-    const newPlayer = data as Player;
-    setPlayers((current) =>
-      [...current, newPlayer].sort(
-        (a, b) => (a.shirt_number ?? 999) - (b.shirt_number ?? 999)
-      )
-    );
-
-    setPlayerName("");
-    setPlayerPosition("Sturm");
-    setShirtNumber("");
-    setPlayerSaving(false);
-  }
-
-  async function deletePlayer(playerId: string) {
-    const player = players.find((item) => item.id === playerId);
-
-    const confirmed = window.confirm(
-      `Spieler "${player?.full_name ?? "diesen Spieler"}" löschen?`
-    );
-
-    if (!confirmed) return;
-
-    setError(null);
-
-    const { error: deleteError } = await supabase
-      .from("players")
-      .delete()
-      .eq("id", playerId);
-
-    if (deleteError) {
-      setError(deleteError.message);
-      return;
-    }
-
-    setPlayers((current) => current.filter((player) => player.id !== playerId));
   }
 
   if (authLoading) {
@@ -271,7 +240,7 @@ export default function TeamsPage() {
       <main className="auth-shell">
         <section className="auth-card auth-loading">
           <span className="button-spinner" aria-hidden="true" />
-          <p>Teamverwaltung wird geladen …</p>
+          <p>Teams werden geladen …</p>
         </section>
       </main>
     );
@@ -279,290 +248,281 @@ export default function TeamsPage() {
 
   return (
     <main className="app-shell">
-      <header className="topbar">
-        <a className="brand" href="/">
-          <div className="brand-mark" aria-hidden="true">⚽</div>
+      <header className="topbar no-print">
+        <div className="brand">
+          <div className="brand-mark" aria-hidden="true">
+            ⚽
+          </div>
           <div>
             <span className="brand-name">MATCHPLAN AI</span>
-            <span className="brand-caption">Teamverwaltung</span>
+            <span className="brand-caption">Teams verwalten</span>
           </div>
-        </a>
+        </div>
 
         <div className="topbar-actions">
           <a className="status-pill link-pill" href="/">
-            ← Dashboard
+            ← Zurück
           </a>
-          <button
-            type="button"
-            className="status-pill logout-button"
-            onClick={async () => {
-              await supabase.auth.signOut();
-              router.replace("/login");
-            }}
-          >
-            Ausloggen
-          </button>
         </div>
       </header>
 
-      <section className="hero team-hero">
-        <p className="eyebrow">Trainerbereich · Kader</p>
+      <section className="hero no-print">
+        <p className="eyebrow">Mannschaften & Spieler</p>
         <h1>
-          Dein Team.
+          Deine
           <br />
-          <span>Deine Spieler.</span>
+          <span>Teams</span>
         </h1>
         <p>
-          Lege Mannschaften an und verwalte deinen Kader. Im nächsten Schritt
-          kannst du Home-Workouts direkt an Spieler zuweisen.
+          Verwalte deine Mannschaften, füge Spieler hinzu und verschicke
+          Einladungs-Links.
         </p>
       </section>
 
-      {error && (
-        <div className="error-box team-error" role="alert">
-          <strong>Das hat nicht geklappt:</strong>
-          <br />
-          {error}
-        </div>
-      )}
-
-      <section className="team-layout">
-        <aside className="panel team-sidebar">
+      <section className="workspace">
+        <section className="panel no-print">
           <div className="panel-header">
             <div>
-              <p className="panel-kicker">Mannschaften</p>
-              <h2>Meine Teams</h2>
+              <p className="panel-kicker">Neues Team</p>
+              <h2>Team erstellen</h2>
             </div>
-            <span className="plan-badge">{teams.length}</span>
           </div>
 
-          <div className="team-list">
-            {teamsLoading && (
-              <p className="small-loading">Teams werden geladen …</p>
-            )}
+          <div className="form-content">
+            <div className="field-grid">
+              <div className="field">
+                <label htmlFor="team-name">Team-Name</label>
+                <input
+                  id="team-name"
+                  value={newTeamName}
+                  onChange={(e) => setNewTeamName(e.target.value)}
+                  placeholder="z. B. U15 Blau"
+                />
+              </div>
 
-            {!teamsLoading && teams.length === 0 && (
-              <p className="small-empty">
-                Lege rechts dein erstes Team an.
-              </p>
-            )}
-
-            {teams.map((team) => (
-              <button
-                type="button"
-                key={team.id}
-                className={`team-item ${
-                  team.id === selectedTeamId ? "active" : ""
-                }`}
-                onClick={() => setSelectedTeamId(team.id)}
-              >
-                <span className="team-item-icon">⚽</span>
-                <span className="team-item-info">
-                  <strong>{team.name}</strong>
-                  <small>{team.age_group || "Ohne Altersgruppe"}</small>
-                </span>
-                <span className="team-item-arrow">›</span>
-              </button>
-            ))}
-          </div>
-
-          <form className="add-team-form" onSubmit={createTeam}>
-            <p className="form-section-title">Neues Team</p>
-
-            <div className="field">
-              <label htmlFor="team-name">Teamname</label>
-              <input
-                id="team-name"
-                value={teamName}
-                required
-                maxLength={100}
-                onChange={(event) => setTeamName(event.target.value)}
-                placeholder="z. B. FC Musterstadt U15"
-              />
-            </div>
-
-            <div className="field">
-              <label htmlFor="age-group">Altersgruppe</label>
-              <select
-                id="age-group"
-                value={ageGroup}
-                onChange={(event) => setAgeGroup(event.target.value)}
-              >
-                <option>U9</option>
-                <option>U11</option>
-                <option>U13</option>
-                <option>U15</option>
-                <option>U17</option>
-                <option>U19</option>
-                <option>Senioren</option>
-              </select>
+              <div className="field">
+                <label htmlFor="team-age">Altersgruppe</label>
+                <input
+                  id="team-age"
+                  value={newTeamAgeGroup}
+                  onChange={(e) => setNewTeamAgeGroup(e.target.value)}
+                  placeholder="z. B. U15"
+                />
+              </div>
             </div>
 
             <button
-              className="generate-button compact-button"
-              type="submit"
-              disabled={teamSaving}
+              type="button"
+              className="generate-button"
+              onClick={createTeam}
+              disabled={!newTeamName.trim()}
             >
-              {teamSaving && <span className="button-spinner" />}
-              {teamSaving ? "Erstellt ..." : "+ Team anlegen"}
+              Team erstellen
             </button>
-          </form>
-        </aside>
+          </div>
+        </section>
 
-        <section className="panel team-main">
-          {!selectedTeam ? (
-            <div className="empty-state team-empty">
+        <section className="panel no-print">
+          <div className="panel-header">
+            <div>
+              <p className="panel-kicker">Spieler hinzufügen</p>
+              <h2>Neuer Spieler</h2>
+            </div>
+          </div>
+
+          <div className="form-content">
+            <div className="field-grid">
+              <div className="field">
+                <label htmlFor="player-team">Team</label>
+                <select
+                  id="player-team"
+                  value={selectedTeamId}
+                  onChange={(e) => setSelectedTeamId(e.target.value)}
+                >
+                  <option value="">Team auswählen …</option>
+                  {teams.map((team) => (
+                    <option key={team.id} value={team.id}>
+                      {team.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="field">
+                <label htmlFor="player-name">Name</label>
+                <input
+                  id="player-name"
+                  value={newPlayerFullName}
+                  onChange={(e) => setNewPlayerFullName(e.target.value)}
+                  placeholder="Max Mustermann"
+                />
+              </div>
+
+              <div className="field">
+                <label htmlFor="player-position">Position</label>
+                <input
+                  id="player-position"
+                  value={newPlayerPosition}
+                  onChange={(e) => setNewPlayerPosition(e.target.value)}
+                  placeholder="z. B. Stürmer"
+                />
+              </div>
+
+              <div className="field">
+                <label htmlFor="player-number">Trikotnummer</label>
+                <input
+                  id="player-number"
+                  type="number"
+                  value={newPlayerShirtNumber}
+                  onChange={(e) => setNewPlayerShirtNumber(e.target.value)}
+                  placeholder="10"
+                />
+              </div>
+            </div>
+
+            <button
+              type="button"
+              className="generate-button"
+              onClick={createPlayer}
+              disabled={!selectedTeamId || !newPlayerFullName.trim()}
+            >
+              Spieler hinzufügen
+            </button>
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-header">
+            <div>
+              <p className="panel-kicker">Deine Teams</p>
+              <h2>Übersicht</h2>
+            </div>
+
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => void loadData()}
+              disabled={loading}
+            >
+              {loading ? "Lädt ..." : "↻ Aktualisieren"}
+            </button>
+          </div>
+
+          {error && (
+            <div className="error-box" role="alert">
+              <strong>Fehler:</strong>
+              <br />
+              {error}
+            </div>
+          )}
+
+          {teams.length === 0 ? (
+            <div className="empty-state">
               <div>
-                <div className="empty-icon" aria-hidden="true">⚽</div>
-                <h3>Noch kein Team ausgewählt</h3>
-                <p>
-                  Lege links ein Team an. Danach kannst du Spieler zu deinem
-                  Kader hinzufügen.
-                </p>
+                <div className="empty-icon" aria-hidden="true">
+                  ⚽
+                </div>
+                <h3>Noch keine Teams</h3>
+                <p>Erstelle oben dein erstes Team.</p>
               </div>
             </div>
           ) : (
-            <>
-              <div className="panel-header team-main-header">
-                <div>
-                  <p className="panel-kicker">
-                    {selectedTeam.age_group || "Mannschaft"}
-                  </p>
-                  <h2>{selectedTeam.name}</h2>
-                </div>
+            <div className="teams-grid">
+              {teams.map((team) => {
+                const teamPlayers = players.filter((p) => p.team_id === team.id);
+                const teamInvitation = invitations.find((inv) => inv.team_id === team.id && !inv.used);
 
-                <button
-                  type="button"
-                  className="danger-button"
-                  onClick={() => void deleteTeam(selectedTeam.id)}
-                >
-                  Team löschen
-                </button>
-              </div>
+                return (
+                  <article className="team-card" key={team.id}>
+                    <div className="team-card-header">
+                      <div>
+                        <h3>{team.name}</h3>
+                        {team.age_group && (
+                          <span className="team-age">{team.age_group}</span>
+                        )}
+                      </div>
 
-              <div className="team-stats">
-                <div className="team-stat">
-                  <strong>{players.length}</strong>
-                  <span>Spieler im Kader</span>
-                </div>
-                <div className="team-stat">
-                  <strong>{selectedTeam.age_group || "–"}</strong>
-                  <span>Altersgruppe</span>
-                </div>
-                <div className="team-stat">
-                  <strong>0</strong>
-                  <span>Offene Aufgaben</span>
-                </div>
-              </div>
+                      <button
+                        type="button"
+                        className="invite-button"
+                        onClick={() => void createInvitation(team)}
+                      >
+                        ✉ Einladen
+                      </button>
+                    </div>
 
-              <div className="roster-section">
-                <div className="roster-heading">
-                  <div>
-                    <p className="panel-kicker">Kader</p>
-                    <h3>Spieler</h3>
-                  </div>
-                  <span className="roster-count">{players.length} gesamt</span>
-                </div>
+                    <div className="team-card-meta">
+                      <span>👥 {teamPlayers.length} Spieler</span>
+                      {teamInvitation && (
+                        <span className="invite-active">✓ Einladungs-Link aktiv</span>
+                      )}
+                    </div>
 
-                {playersLoading && (
-                  <p className="small-loading">Spieler werden geladen …</p>
-                )}
-
-                {!playersLoading && players.length === 0 && (
-                  <div className="roster-empty">
-                    <span>👟</span>
-                    <p>Noch keine Spieler angelegt.</p>
-                  </div>
-                )}
-
-                {!playersLoading && players.length > 0 && (
-                  <div className="player-list">
-                    {players.map((player) => (
-                      <article className="player-row" key={player.id}>
-                        <div className="player-number">
-                          {player.shirt_number ?? "–"}
-                        </div>
-                        <div className="player-info">
-                          <strong>{player.full_name}</strong>
-                          <span>{player.position || "Position offen"}</span>
-                        </div>
-                        <button
-                          type="button"
-                          className="player-delete"
-                          title={`${player.full_name} löschen`}
-                          onClick={() => void deletePlayer(player.id)}
-                        >
-                          ×
-                        </button>
-                      </article>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <form className="add-player-form" onSubmit={createPlayer}>
-                <div className="add-player-heading">
-                  <div>
-                    <p className="panel-kicker">Kader erweitern</p>
-                    <h3>Spieler hinzufügen</h3>
-                  </div>
-                </div>
-
-                <div className="player-form-grid">
-                  <div className="field player-name-field">
-                    <label htmlFor="player-name">Name</label>
-                    <input
-                      id="player-name"
-                      value={playerName}
-                      required
-                      maxLength={100}
-                      onChange={(event) => setPlayerName(event.target.value)}
-                      placeholder="Vor- und Nachname"
-                    />
-                  </div>
-
-                  <div className="field">
-                    <label htmlFor="player-position">Position</label>
-                    <select
-                      id="player-position"
-                      value={playerPosition}
-                      onChange={(event) =>
-                        setPlayerPosition(event.target.value)
-                      }
-                    >
-                      {POSITIONS.map((position) => (
-                        <option key={position}>{position}</option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div className="field shirt-field">
-                    <label htmlFor="shirt-number">Nr.</label>
-                    <input
-                      id="shirt-number"
-                      type="number"
-                      min="0"
-                      max="99"
-                      value={shirtNumber}
-                      onChange={(event) => setShirtNumber(event.target.value)}
-                      placeholder="10"
-                    />
-                  </div>
-
-                  <button
-                    className="generate-button add-player-button"
-                    type="submit"
-                    disabled={playerSaving}
-                  >
-                    {playerSaving && <span className="button-spinner" />}
-                    {playerSaving ? "..." : "+ Hinzufügen"}
-                  </button>
-                </div>
-              </form>
-            </>
+                    {teamPlayers.length > 0 && (
+                      <div className="team-players">
+                        {teamPlayers.map((player) => (
+                          <div className="player-row" key={player.id}>
+                            <span className="player-number">
+                              {player.shirt_number ?? "–"}
+                            </span>
+                            <span className="player-name">
+                              <strong>{player.full_name}</strong>
+                              <small>{player.position || "Position offen"}</small>
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
           )}
         </section>
       </section>
+
+      {showInviteModal && selectedTeamForInvite && (
+        <div
+          className="modal-backdrop no-print"
+          role="presentation"
+          onMouseDown={() => setShowInviteModal(false)}
+        >
+          <section
+            className="save-modal"
+            role="dialog"
+            aria-modal="true"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <p className="panel-kicker">Einladungs-Link</p>
+            <h2>{selectedTeamForInvite.name}</h2>
+            <p>
+              Verschicke diesen Link an deine Spieler. Sie können sich darüber
+              registrieren und werden automatisch diesem Team zugeordnet.
+            </p>
+
+            <div className="invite-link-box">
+              <code>{invitationLink}</code>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={copyInvitationLink}
+              >
+                Kopieren
+              </button>
+            </div>
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setShowInviteModal(false)}
+              >
+                Schließen
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </main>
   );
 }

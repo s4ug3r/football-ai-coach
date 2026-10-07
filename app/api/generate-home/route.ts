@@ -141,7 +141,7 @@ async function callOpenRouterJSON<T>(
   }
 
   const data = await response.json();
-  const content = data.choices?.?.message?.content;[0]
+  const content = data.choices?.[0]?.message?.content;
 
   if (typeof content !== "string" || !content.trim()) {
     throw new Error("OpenRouter hat kein Home-Workout zurückgegeben.");

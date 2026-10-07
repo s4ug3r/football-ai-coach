@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "../../lib/supabase/client";
 
-export default function SignUpPlayerPage() {
+function SignUpPlayerContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const supabase = createClient();
@@ -242,5 +242,20 @@ export default function SignUpPlayerPage() {
         </p>
       </section>
     </main>
+  );
+}
+
+export default function SignUpPlayerPage() {
+  return (
+    <Suspense fallback={
+      <main className="auth-shell">
+        <section className="auth-card auth-loading">
+          <span className="button-spinner" aria-hidden="true" />
+          <p>Wird geladen …</p>
+        </section>
+      </main>
+    }>
+      <SignUpPlayerContent />
+    </Suspense>
   );
 }

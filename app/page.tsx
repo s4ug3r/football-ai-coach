@@ -62,6 +62,22 @@ type SavedPlan = {
   created_at: string;
 };
 
+type Team = {
+  id: string;
+  coach_id: string;
+  name: string;
+  age_group: string | null;
+};
+
+type Player = {
+  id: string;
+  team_id: string;
+  coach_id: string;
+  full_name: string;
+  position: string | null;
+  shirt_number: number | null;
+};
+
 function getErrorMessage(error: unknown) {
   if (error instanceof Error) return error.message;
   return "Ein unbekannter Fehler ist aufgetreten.";
@@ -79,6 +95,10 @@ function formatDate(dateString: string) {
 
 function isSessionPlan(plan: SessionPlan | HomeWorkout): plan is SessionPlan {
   return "phases" in plan;
+}
+
+function getTodayDate() {
+  return new Date().toISOString().slice(0, 10);
 }
 
 export default function HomePage() {
@@ -124,6 +144,19 @@ export default function HomePage() {
   const [saveError, setSaveError] = useState<string | null>(null);
 
   const [deleteLoadingId, setDeleteLoadingId] = useState<string | null>(null);
+
+  const [assignDialogOpen, setAssignDialogOpen] = useState(false);
+  const [assignmentPlan, setAssignmentPlan] = useState<SavedPlan | null>(null);
+  const [teams, setTeams] = useState<Team[]>([]);
+  const [assignmentTeamId, setAssignmentTeamId] = useState("");
+  const [teamPlayers, setTeamPlayers] = useState<Player[]>([]);
+  const [selectedPlayerIds, setSelectedPlayerIds] = useState<string[]>([]);
+  const [dueDate, setDueDate] = useState("");
+  const [assignLoading, setAssignLoading] = useState(false);
+  const [assignError, setAssignError] = useState<string | null>(null);
+  const [assignmentSuccess, setAssignmentSuccess] = useState<string | null>(
+    null
+  );
 
   const isSessionTab = tab === "session";
   const isSavedTab = tab === "saved";
@@ -174,6 +207,15 @@ export default function HomePage() {
       void loadSavedPlans();
     }
   }, [tab, userId]);
+
+  useEffect(() => {
+    if (assignmentTeamId) {
+      void loadPlayersForAssignment(assignmentTeamId);
+    } else {
+      setTeamPlayers([]);
+      setSelectedPlayerIds([]);
+    }
+  }, [assignmentTeamId]);
 
   async function signOut() {
     await supabase.auth.signOut();
@@ -359,6 +401,114 @@ export default function HomePage() {
     window.print();
   }
 
+  async function openAssignDialog(plan: SavedPlan) {
+    setAssignmentPlan(plan);
+    setAssignmentTeamId("");
+    setTeamPlayers([]);
+    setSelectedPlayerIds([]);
+    setDueDate("");
+    setAssignError(null);
+    setAssignmentSuccess(null);
+    setAssignDialogOpen(true);
+
+    const { data, error } = await supabase
+      .from("teams")
+      .select("id, coach_id, name, age_group")
+      .order("created_at", { ascending: true });
+
+    if (error) {
+      setAssignError(error.message);
+      return;
+    }
+
+    setTeams((data ?? []) as Team[]);
+  }
+
+  async function loadPlayersForAssignment(teamId: string) {
+    setAssignError(null);
+
+    const { data, error } = await supabase
+      .from("players")
+      .select("id, team_id, coach_id, full_name, position, shirt_number")
+      .eq("team_id", teamId)
+      .order("shirt_number", { ascending: true });
+
+    if (error) {
+      setAssignError(error.message);
+      return;
+    }
+
+    const loadedPlayers = (data ?? []) as Player[];
+    setTeamPlayers(loadedPlayers);
+    setSelectedPlayerIds(loadedPlayers.map((player) => player.id));
+  }
+
+  function togglePlayer(playerId: string) {
+    setSelectedPlayerIds((current) =>
+      current.includes(playerId)
+        ? current.filter((id) => id !== playerId)
+        : [...current, playerId]
+    );
+  }
+
+  function toggleAllPlayers() {
+    if (selectedPlayerIds.length === teamPlayers.length) {
+      setSelectedPlayerIds([]);
+      return;
+    }
+
+    setSelectedPlayerIds(teamPlayers.map((player) => player.id));
+  }
+
+  async function createAssignments() {
+    if (!userId || !assignmentPlan) {
+      setAssignError("Bitte wähle zuerst ein Home-Workout aus.");
+      return;
+    }
+
+    if (!assignmentTeamId) {
+      setAssignError("Bitte wähle ein Team aus.");
+      return;
+    }
+
+    if (selectedPlayerIds.length === 0) {
+      setAssignError("Bitte wähle mindestens einen Spieler aus.");
+      return;
+    }
+
+    setAssignLoading(true);
+    setAssignError(null);
+    setAssignmentSuccess(null);
+
+    const assignmentRows = selectedPlayerIds.map((playerId) => ({
+      coach_id: userId,
+      team_id: assignmentTeamId,
+      player_id: playerId,
+      training_plan_id: assignmentPlan.id,
+      due_date: dueDate || null,
+    }));
+
+    const { error } = await supabase
+      .from("workout_assignments")
+      .upsert(assignmentRows, {
+        onConflict: "training_plan_id,player_id",
+        ignoreDuplicates: true,
+      });
+
+    if (error) {
+      setAssignError(error.message);
+      setAssignLoading(false);
+      return;
+    }
+
+    setAssignmentSuccess(
+      `Workout wurde ${selectedPlayerIds.length} Spieler${
+        selectedPlayerIds.length === 1 ? "" : "n"
+      } zugewiesen.`
+    );
+    setAssignLoading(false);
+  }
+
   const currentPlan = isSessionTab ? sessionPlan : homeWorkout;
   const currentLoading = isSessionTab ? sessionLoading : homeLoading;
   const currentError = isSessionTab ? sessionError : homeError;
@@ -467,7 +617,7 @@ export default function HomePage() {
           <span>
             <span className="tab-title">Meine Pläne</span>
             <span className="tab-description">
-              Speichern, öffnen und wiederverwenden
+              Speichern, öffnen und zuweisen
             </span>
           </span>
         </button>
@@ -553,6 +703,16 @@ export default function HomePage() {
                     >
                       Öffnen
                     </button>
+
+                    {plan.plan_type === "home" && (
+                      <button
+                        type="button"
+                        className="assign-button"
+                        onClick={() => void openAssignDialog(plan)}
+                      >
+                        Zuweisen
+                      </button>
+                    )}
 
                     <button
                       type="button"
@@ -962,6 +1122,179 @@ export default function HomePage() {
                 )}
                 {saveLoading ? "Speichert ..." : "Plan speichern"}
               </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {assignDialogOpen && (
+        <div
+          className="modal-backdrop no-print"
+          role="presentation"
+          onMouseDown={() => {
+            if (!assignLoading) setAssignDialogOpen(false);
+          }}
+        >
+          <section
+            className="save-modal assignment-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="assign-dialog-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <p className="panel-kicker">Home-Workout zuweisen</p>
+            <h2 id="assign-dialog-title">
+              {assignmentPlan?.title || "Workout auswählen"}
+            </h2>
+            <p>
+              Wähle ein Team und die Spieler, die dieses Workout erhalten
+              sollen.
+            </p>
+
+            <div className="field">
+              <label htmlFor="assignment-team">Team</label>
+              <select
+                id="assignment-team"
+                value={assignmentTeamId}
+                onChange={(event) => setAssignmentTeamId(event.target.value)}
+              >
+                <option value="">Team auswählen …</option>
+                {teams.map((team) => (
+                  <option key={team.id} value={team.id}>
+                    {team.name}
+                    {team.age_group ? ` (${team.age_group})` : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {teams.length === 0 && (
+              <div className="assignment-info">
+                Du hast noch kein Team angelegt. Gehe zuerst zu „Teams“ und
+                erstelle eine Mannschaft mit Spielern.
+              </div>
+            )}
+
+            {assignmentTeamId && (
+              <>
+                <div className="field assignment-due-date">
+                  <label htmlFor="assignment-due-date">
+                    Fälligkeitsdatum (optional)
+                  </label>
+                  <input
+                    id="assignment-due-date"
+                    type="date"
+                    min={getTodayDate()}
+                    value={dueDate}
+                    onChange={(event) => setDueDate(event.target.value)}
+                  />
+                </div>
+
+                <div className="assignment-player-header">
+                  <div>
+                    <p className="form-section-title">Spieler auswählen</p>
+                    <span>
+                      {selectedPlayerIds.length} von {teamPlayers.length}{" "}
+                      ausgewählt
+                    </span>
+                  </div>
+
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={toggleAllPlayers}
+                    disabled={teamPlayers.length === 0}
+                  >
+                    {selectedPlayerIds.length === teamPlayers.length
+                      ? "Alle abwählen"
+                      : "Alle auswählen"}
+                  </button>
+                </div>
+
+                {teamPlayers.length === 0 ? (
+                  <div className="assignment-info">
+                    Dieses Team hat noch keine Spieler. Ergänze sie unter
+                    „Teams“.
+                  </div>
+                ) : (
+                  <div className="assignment-player-list">
+                    {teamPlayers.map((player) => {
+                      const selected = selectedPlayerIds.includes(player.id);
+
+                      return (
+                        <label
+                          className={`assignment-player ${
+                            selected ? "selected" : ""
+                          }`}
+                          key={player.id}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selected}
+                            onChange={() => togglePlayer(player.id)}
+                          />
+
+                          <span className="assignment-player-number">
+                            {player.shirt_number ?? "–"}
+                          </span>
+
+                          <span className="assignment-player-name">
+                            <strong>{player.full_name}</strong>
+                            <small>
+                              {player.position || "Position offen"}
+                            </small>
+                          </span>
+
+                          <span className="assignment-check">✓</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </>
+            )}
+
+            {assignError && (
+              <div className="error-box modal-error" role="alert">
+                {assignError}
+              </div>
+            )}
+
+            {assignmentSuccess && (
+              <div className="success-box assignment-success" role="status">
+                {assignmentSuccess}
+              </div>
+            )}
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setAssignDialogOpen(false)}
+                disabled={assignLoading}
+              >
+                {assignmentSuccess ? "Schließen" : "Abbrechen"}
+              </button>
+
+              {!assignmentSuccess && (
+                <button
+                  type="button"
+                  className="generate-button modal-save-button"
+                  onClick={() => void createAssignments()}
+                  disabled={
+                    assignLoading ||
+                    !assignmentTeamId ||
+                    selectedPlayerIds.length === 0
+                  }
+                >
+                  {assignLoading && (
+                    <span className="button-spinner" aria-hidden="true" />
+                  )}
+                  {assignLoading
+                    ? "Weist zu ..."
+                    : `${selectedPlayerIds.length || 0} Spieler zuweisen`}
+                </button>
+              )}
             </div>
           </section>
         </div>

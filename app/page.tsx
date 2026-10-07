@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "../lib/supabase/client";
 
-type Tab = "session" | "home";
+type Tab = "session" | "home" | "saved";
 
 type SessionExercise = {
   name: string;
@@ -51,18 +51,44 @@ type HomeWorkout = {
   blocks: HomeBlock[];
 };
 
+type SavedPlan = {
+  id: string;
+  user_id: string;
+  title: string;
+  plan_type: "team" | "home";
+  focus: string;
+  duration_min: number;
+  plan_data: SessionPlan | HomeWorkout;
+  created_at: string;
+};
+
 function getErrorMessage(value: unknown): string {
   if (value instanceof Error) return value.message;
   return "Ein unbekannter Fehler ist aufgetreten.";
 }
 
+function formatDate(dateString: string): string {
+  return new Intl.DateTimeFormat("de-DE", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(dateString));
+}
+
+function isSessionPlan(value: SessionPlan | HomeWorkout): value is SessionPlan {
+  return "phases" in value;
+}
+
 export default function HomePage() {
   const router = useRouter();
-
   const supabase = useMemo(() => createClient(), []);
 
   const [authLoading, setAuthLoading] = useState(true);
+  const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
+
   const [tab, setTab] = useState<Tab>("session");
 
   const [sessionDuration, setSessionDuration] = useState(90);
@@ -88,6 +114,21 @@ export default function HomePage() {
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [homeError, setHomeError] = useState<string | null>(null);
 
+  const [savedPlans, setSavedPlans] = useState<SavedPlan[]>([]);
+  const [savedPlansLoading, setSavedPlansLoading] = useState(false);
+  const [savedPlansError, setSavedPlansError] = useState<string | null>(null);
+
+  const [saveDialogOpen, setSaveDialogOpen] = useState(false);
+  const [saveTitle, setSaveTitle] = useState("");
+  const [saveLoading, setSaveLoading] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const [activeSavedPlan, setActiveSavedPlan] = useState<SavedPlan | null>(null);
+  const [deleteLoadingId, setDeleteLoadingId] = useState<string | null>(null);
+
+  const isSessionTab = tab === "session";
+  const isSavedTab = tab === "saved";
+
   useEffect(() => {
     let active = true;
 
@@ -103,6 +144,7 @@ export default function HomePage() {
         return;
       }
 
+      setUserId(user.id);
       setUserEmail(user.email ?? null);
       setAuthLoading(false);
     }
@@ -117,6 +159,7 @@ export default function HomePage() {
         return;
       }
 
+      setUserId(session.user.id);
       setUserEmail(session.user.email ?? null);
       setAuthLoading(false);
     });
@@ -127,10 +170,35 @@ export default function HomePage() {
     };
   }, [router, supabase]);
 
+  useEffect(() => {
+    if (tab === "saved" && userId) {
+      void loadSavedPlans();
+    }
+  }, [tab, userId]);
+
   async function signOut() {
     await supabase.auth.signOut();
     router.replace("/login");
     router.refresh();
+  }
+
+  async function loadSavedPlans() {
+    setSavedPlansLoading(true);
+    setSavedPlansError(null);
+
+    const { data, error } = await supabase
+      .from("training_plans")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      setSavedPlansError(error.message);
+      setSavedPlansLoading(false);
+      return;
+    }
+
+    setSavedPlans((data ?? []) as SavedPlan[]);
+    setSavedPlansLoading(false);
   }
 
   async function generateSessionPlan() {
@@ -160,6 +228,7 @@ export default function HomePage() {
       }
 
       setSessionPlan(json.data as SessionPlan);
+      setActiveSavedPlan(null);
     } catch (error) {
       setSessionError(getErrorMessage(error));
     } finally {
@@ -193,6 +262,7 @@ export default function HomePage() {
       }
 
       setHomeWorkout(json.data as HomeWorkout);
+      setActiveSavedPlan(null);
     } catch (error) {
       setHomeError(getErrorMessage(error));
     } finally {
@@ -200,10 +270,108 @@ export default function HomePage() {
     }
   }
 
-  const isSessionTab = tab === "session";
-  const loading = isSessionTab ? sessionLoading : homeLoading;
-  const error = isSessionTab ? sessionError : homeError;
-  const hasResult = isSessionTab ? Boolean(sessionPlan) : Boolean(homeWorkout);
+  function openSaveDialog() {
+    const plan = isSessionTab ? sessionPlan : homeWorkout;
+
+    if (!plan) return;
+
+    setSaveTitle(plan.title);
+    setSaveError(null);
+    setSaveDialogOpen(true);
+  }
+
+  async function saveCurrentPlan() {
+    const plan = isSessionTab ? sessionPlan : homeWorkout;
+
+    if (!userId || !plan) {
+      setSaveError("Bitte erstelle zuerst einen Trainingsplan.");
+      return;
+    }
+
+    const title = saveTitle.trim();
+
+    if (!title) {
+      setSaveError("Bitte gib einen Namen für den Plan ein.");
+      return;
+    }
+
+    setSaveLoading(true);
+    setSaveError(null);
+
+    const { error } = await supabase.from("training_plans").insert({
+      user_id: userId,
+      title,
+      plan_type: isSessionTab ? "team" : "home",
+      focus: isSessionTab ? sessionFocus : homeFocus,
+      duration_min: plan.duration_min,
+      plan_data: plan,
+    });
+
+    if (error) {
+      setSaveError(error.message);
+      setSaveLoading(false);
+      return;
+    }
+
+    setSaveDialogOpen(false);
+    setSaveLoading(false);
+    setTab("saved");
+    await loadSavedPlans();
+  }
+
+  async function deleteSavedPlan(planId: string) {
+    const confirmed = window.confirm(
+      "Möchtest du diesen gespeicherten Plan wirklich löschen?"
+    );
+
+    if (!confirmed) return;
+
+    setDeleteLoadingId(planId);
+
+    const { error } = await supabase
+      .from("training_plans")
+      .delete()
+      .eq("id", planId);
+
+    if (error) {
+      setSavedPlansError(error.message);
+      setDeleteLoadingId(null);
+      return;
+    }
+
+    setSavedPlans((current) => current.filter((plan) => plan.id !== planId));
+
+    if (activeSavedPlan?.id === planId) {
+      setActiveSavedPlan(null);
+    }
+
+    setDeleteLoadingId(null);
+  }
+
+  function openSavedPlan(plan: SavedPlan) {
+    setActiveSavedPlan(plan);
+
+    if (plan.plan_type === "team" && isSessionPlan(plan.plan_data)) {
+      setSessionPlan(plan.plan_data);
+      setSessionFocus(plan.focus);
+      setTab("session");
+    }
+
+    if (plan.plan_type === "home" && !isSessionPlan(plan.plan_data)) {
+      setHomeWorkout(plan.plan_data);
+      setHomeFocus(plan.focus);
+      setTab("home");
+    }
+  }
+
+  function printPlan() {
+    window.print();
+  }
+
+  const currentPlan = isSessionTab ? sessionPlan : homeWorkout;
+  const currentLoading = isSessionTab ? sessionLoading : homeLoading;
+  const currentError = isSessionTab ? sessionError : homeError;
+  const hasCurrentPlan = Boolean(currentPlan);
 
   if (authLoading) {
     return (
@@ -218,7 +386,7 @@ export default function HomePage() {
 
   return (
     <main className="app-shell">
-      <header className="topbar">
+      <header className="topbar no-print">
         <div className="brand">
           <div className="brand-mark" aria-hidden="true">
             ⚽
@@ -240,7 +408,6 @@ export default function HomePage() {
             type="button"
             className="status-pill logout-button"
             onClick={signOut}
-            title="Ausloggen"
           >
             <span className="status-dot" aria-hidden="true" />
             Ausloggen
@@ -248,7 +415,7 @@ export default function HomePage() {
         </div>
       </header>
 
-      <section className="hero">
+      <section className="hero no-print">
         <p className="eyebrow">Fußballtraining · Einfach geplant</p>
         <h1>
           Bessere Einheiten.
@@ -261,12 +428,12 @@ export default function HomePage() {
         </p>
       </section>
 
-      <nav className="tab-list" aria-label="Trainingsart auswählen">
+      <nav className="tab-list no-print" aria-label="Bereich auswählen">
         <button
           type="button"
-          className={`tab ${isSessionTab ? "active" : ""}`}
+          className={`tab ${tab === "session" ? "active" : ""}`}
           onClick={() => setTab("session")}
-          aria-pressed={isSessionTab}
+          aria-pressed={tab === "session"}
         >
           <span className="tab-icon" aria-hidden="true">
             ⚽
@@ -281,9 +448,9 @@ export default function HomePage() {
 
         <button
           type="button"
-          className={`tab ${!isSessionTab ? "active" : ""}`}
+          className={`tab ${tab === "home" ? "active" : ""}`}
           onClick={() => setTab("home")}
-          aria-pressed={!isSessionTab}
+          aria-pressed={tab === "home"}
         >
           <span className="tab-icon" aria-hidden="true">
             ⌂
@@ -295,432 +462,649 @@ export default function HomePage() {
             </span>
           </span>
         </button>
+
+        <button
+          type="button"
+          className={`tab ${tab === "saved" ? "active" : ""}`}
+          onClick={() => setTab("saved")}
+          aria-pressed={tab === "saved"}
+        >
+          <span className="tab-icon" aria-hidden="true">
+            ▣
+          </span>
+          <span>
+            <span className="tab-title">Meine Pläne</span>
+            <span className="tab-description">
+              Speichern, öffnen und wiederverwenden
+            </span>
+          </span>
+        </button>
       </nav>
 
-      <section className="workspace">
-        <section className="panel">
-          <div className="panel-header">
+      {isSavedTab ? (
+        <section className="saved-page">
+          <div className="saved-page-header">
             <div>
-              <p className="panel-kicker">Plan konfigurieren</p>
-              <h2>
-                {isSessionTab
-                  ? "Teamtraining erstellen"
-                  : "Home-Workout erstellen"}
-              </h2>
+              <p className="panel-kicker">Deine Bibliothek</p>
+              <h2>Meine gespeicherten Pläne</h2>
             </div>
 
-            <span className="plan-badge">
-              {isSessionTab ? "TEAM" : "SOLO"}
-            </span>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => void loadSavedPlans()}
+              disabled={savedPlansLoading}
+            >
+              {savedPlansLoading ? "Lädt ..." : "↻ Aktualisieren"}
+            </button>
           </div>
 
-          {isSessionTab ? (
-            <div className="form-content">
-              <div className="field-grid">
-                <div className="field">
-                  <label htmlFor="session-duration">Dauer</label>
-                  <select
-                    id="session-duration"
-                    value={sessionDuration}
-                    onChange={(event) =>
-                      setSessionDuration(Number(event.target.value))
-                    }
-                  >
-                    <option value={60}>60 Minuten</option>
-                    <option value={75}>75 Minuten</option>
-                    <option value={90}>90 Minuten</option>
-                    <option value={105}>105 Minuten</option>
-                    <option value={120}>120 Minuten</option>
-                  </select>
-                </div>
-
-                <div className="field">
-                  <label htmlFor="session-frequency">
-                    Training pro Woche
-                  </label>
-                  <select
-                    id="session-frequency"
-                    value={sessionFrequency}
-                    onChange={(event) =>
-                      setSessionFrequency(Number(event.target.value))
-                    }
-                  >
-                    <option value={1}>1× pro Woche</option>
-                    <option value={2}>2× pro Woche</option>
-                  </select>
-                </div>
-
-                <div className="field">
-                  <label htmlFor="session-focus">Fokus</label>
-                  <select
-                    id="session-focus"
-                    value={sessionFocus}
-                    onChange={(event) => setSessionFocus(event.target.value)}
-                  >
-                    <option>Angriff</option>
-                    <option>Verteidigung</option>
-                    <option>Pressing</option>
-                    <option>Ballbesitz</option>
-                    <option>Umschaltspiel</option>
-                    <option>Standards</option>
-                    <option>Athletik</option>
-                  </select>
-                </div>
-
-                <div className="field">
-                  <label htmlFor="session-level">
-                    Altersgruppe / Level
-                  </label>
-                  <select
-                    id="session-level"
-                    value={sessionLevel}
-                    onChange={(event) => setSessionLevel(event.target.value)}
-                  >
-                    <option>U11</option>
-                    <option>U13</option>
-                    <option>U15+</option>
-                    <option>U17+</option>
-                    <option>Senioren</option>
-                  </select>
-                </div>
-
-                <div className="field">
-                  <label htmlFor="session-location">Trainingsort</label>
-                  <select
-                    id="session-location"
-                    value={sessionLocation}
-                    onChange={(event) =>
-                      setSessionLocation(event.target.value)
-                    }
-                  >
-                    <option>Platz</option>
-                    <option>Halle</option>
-                    <option>Kleinfeld</option>
-                  </select>
-                </div>
-
-                <div className="field">
-                  <label htmlFor="session-equipment">Equipment</label>
-                  <input
-                    id="session-equipment"
-                    value={sessionEquipment}
-                    onChange={(event) =>
-                      setSessionEquipment(event.target.value)
-                    }
-                    placeholder="Hütchen, Leibchen, Tore"
-                  />
-                </div>
-              </div>
-
-              <p className="helper">
-                Die KI erstellt Warm-up, Schwerpunkt, Spielformen,
-                Abschlussspiel und Cooldown passend zu deinem Thema.
-              </p>
-
-              <button
-                type="button"
-                className="generate-button"
-                onClick={generateSessionPlan}
-                disabled={sessionLoading}
-                aria-busy={sessionLoading}
-              >
-                {sessionLoading && (
-                  <span className="button-spinner" aria-hidden="true" />
-                )}
-                {sessionLoading
-                  ? "Plan wird erstellt ..."
-                  : "✦ Trainingsplan generieren"}
-              </button>
-            </div>
-          ) : (
-            <div className="form-content">
-              <div className="field-grid">
-                <div className="field">
-                  <label htmlFor="home-duration">Dauer</label>
-                  <select
-                    id="home-duration"
-                    value={homeDuration}
-                    onChange={(event) =>
-                      setHomeDuration(Number(event.target.value))
-                    }
-                  >
-                    <option value={10}>10 Minuten</option>
-                    <option value={15}>15 Minuten</option>
-                    <option value={20}>20 Minuten</option>
-                    <option value={25}>25 Minuten</option>
-                    <option value={30}>30 Minuten</option>
-                  </select>
-                </div>
-
-                <div className="field">
-                  <label htmlFor="home-focus">Fokus</label>
-                  <select
-                    id="home-focus"
-                    value={homeFocus}
-                    onChange={(event) => setHomeFocus(event.target.value)}
-                  >
-                    <option>Angriff</option>
-                    <option>Ballkontrolle</option>
-                    <option>Dribbling</option>
-                    <option>Passspiel</option>
-                    <option>Koordination</option>
-                    <option>Athletik</option>
-                    <option>Stabilität</option>
-                  </select>
-                </div>
-
-                <div className="field">
-                  <label htmlFor="home-level">Level</label>
-                  <select
-                    id="home-level"
-                    value={homeLevel}
-                    onChange={(event) => setHomeLevel(event.target.value)}
-                  >
-                    <option>Beginner</option>
-                    <option>Intermediate</option>
-                    <option>Advanced</option>
-                  </select>
-                </div>
-
-                <div className="field">
-                  <label htmlFor="home-location">Ort</label>
-                  <select
-                    id="home-location"
-                    value={homeLocation}
-                    onChange={(event) => setHomeLocation(event.target.value)}
-                  >
-                    <option>Zuhause</option>
-                    <option>Garten</option>
-                    <option>Platz</option>
-                    <option>Halle</option>
-                  </select>
-                </div>
-
-                <div className="field full">
-                  <label htmlFor="home-equipment">
-                    Verfügbares Equipment
-                  </label>
-                  <input
-                    id="home-equipment"
-                    value={homeEquipment}
-                    onChange={(event) => setHomeEquipment(event.target.value)}
-                    placeholder="z. B. Nur Ball, Ball und Hütchen"
-                  />
-                </div>
-              </div>
-
-              <p className="helper">
-                Ideal als kleine Trainingsaufgabe zwischen zwei Teamtrainings.
-                Warm-up, Hauptteil und Finisher sind bereits eingeplant.
-              </p>
-
-              <button
-                type="button"
-                className="generate-button"
-                onClick={generateHomeWorkout}
-                disabled={homeLoading}
-                aria-busy={homeLoading}
-              >
-                {homeLoading && (
-                  <span className="button-spinner" aria-hidden="true" />
-                )}
-                {homeLoading
-                  ? "Workout wird erstellt ..."
-                  : "✦ Home-Workout generieren"}
-              </button>
-            </div>
-          )}
-
-          {error && (
-            <div className="error-box" role="alert">
-              <strong>Das hat noch nicht geklappt:</strong>
+          {savedPlansError && (
+            <div className="error-box saved-error" role="alert">
+              <strong>Pläne konnten nicht geladen werden:</strong>
               <br />
-              {error}
+              {savedPlansError}
+            </div>
+          )}
+
+          {savedPlansLoading && (
+            <div className="saved-empty">
+              <span className="button-spinner" aria-hidden="true" />
+              <p>Deine Pläne werden geladen …</p>
+            </div>
+          )}
+
+          {!savedPlansLoading && !savedPlansError && savedPlans.length === 0 && (
+            <div className="saved-empty">
+              <div className="empty-icon" aria-hidden="true">
+                ▣
+              </div>
+              <h3>Noch keine gespeicherten Pläne</h3>
+              <p>
+                Generiere einen Trainingsplan oder ein Home-Workout und speichere
+                ihn anschließend hier.
+              </p>
+            </div>
+          )}
+
+          {!savedPlansLoading && savedPlans.length > 0 && (
+            <div className="saved-plan-grid">
+              {savedPlans.map((plan) => (
+                <article className="saved-plan-card" key={plan.id}>
+                  <div className="saved-card-top">
+                    <span className="saved-type">
+                      {plan.plan_type === "team" ? "TEAMTRAINING" : "HOME-WORKOUT"}
+                    </span>
+                    <span className="saved-date">{formatDate(plan.created_at)}</span>
+                  </div>
+
+                  <h3>{plan.title}</h3>
+
+                  <div className="saved-card-meta">
+                    <span>⚽ {plan.focus}</span>
+                    <span>⏱ {plan.duration_min} Min</span>
+                  </div>
+
+                  <div className="saved-card-actions">
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      onClick={() => openSavedPlan(plan)}
+                    >
+                      Öffnen
+                    </button>
+
+                    <button
+                      type="button"
+                      className="danger-button"
+                      onClick={() => void deleteSavedPlan(plan.id)}
+                      disabled={deleteLoadingId === plan.id}
+                    >
+                      {deleteLoadingId === plan.id ? "Löscht ..." : "Löschen"}
+                    </button>
+                  </div>
+                </article>
+              ))}
             </div>
           )}
         </section>
-
-        <section className="panel">
-          <div className="panel-header">
-            <div>
-              <p className="panel-kicker">Dein Ergebnis</p>
-              <h2>{isSessionTab ? "Trainingsplan" : "Home-Workout"}</h2>
-            </div>
-
-            {hasResult && <span className="plan-badge">FERTIG</span>}
-          </div>
-
-          {!hasResult && !loading && (
-            <div className="empty-state">
+      ) : (
+        <section className="workspace">
+          <section className="panel no-print">
+            <div className="panel-header">
               <div>
-                <div className="empty-icon" aria-hidden="true">
-                  ✦
-                </div>
-                <h3>Bereit für deinen Plan</h3>
-                <p>
-                  Wähle links die Parameter und lass dir einen strukturierten
-                  Trainingsplan erstellen.
-                </p>
+                <p className="panel-kicker">Plan konfigurieren</p>
+                <h2>
+                  {isSessionTab
+                    ? "Teamtraining erstellen"
+                    : "Home-Workout erstellen"}
+                </h2>
               </div>
-            </div>
-          )}
 
-          {loading && (
-            <div className="empty-state">
+              <span className="plan-badge">
+                {isSessionTab ? "TEAM" : "SOLO"}
+              </span>
+            </div>
+
+            {isSessionTab ? (
+              <div className="form-content">
+                <div className="field-grid">
+                  <div className="field">
+                    <label htmlFor="session-duration">Dauer</label>
+                    <select
+                      id="session-duration"
+                      value={sessionDuration}
+                      onChange={(event) =>
+                        setSessionDuration(Number(event.target.value))
+                      }
+                    >
+                      <option value={60}>60 Minuten</option>
+                      <option value={75}>75 Minuten</option>
+                      <option value={90}>90 Minuten</option>
+                      <option value={105}>105 Minuten</option>
+                      <option value={120}>120 Minuten</option>
+                    </select>
+                  </div>
+
+                  <div className="field">
+                    <label htmlFor="session-frequency">
+                      Training pro Woche
+                    </label>
+                    <select
+                      id="session-frequency"
+                      value={sessionFrequency}
+                      onChange={(event) =>
+                        setSessionFrequency(Number(event.target.value))
+                      }
+                    >
+                      <option value={1}>1× pro Woche</option>
+                      <option value={2}>2× pro Woche</option>
+                    </select>
+                  </div>
+
+                  <div className="field">
+                    <label htmlFor="session-focus">Fokus</label>
+                    <select
+                      id="session-focus"
+                      value={sessionFocus}
+                      onChange={(event) =>
+                        setSessionFocus(event.target.value)
+                      }
+                    >
+                      <option>Angriff</option>
+                      <option>Verteidigung</option>
+                      <option>Pressing</option>
+                      <option>Ballbesitz</option>
+                      <option>Umschaltspiel</option>
+                      <option>Standards</option>
+                      <option>Athletik</option>
+                    </select>
+                  </div>
+
+                  <div className="field">
+                    <label htmlFor="session-level">
+                      Altersgruppe / Level
+                    </label>
+                    <select
+                      id="session-level"
+                      value={sessionLevel}
+                      onChange={(event) =>
+                        setSessionLevel(event.target.value)
+                      }
+                    >
+                      <option>U11</option>
+                      <option>U13</option>
+                      <option>U15+</option>
+                      <option>U17+</option>
+                      <option>Senioren</option>
+                    </select>
+                  </div>
+
+                  <div className="field">
+                    <label htmlFor="session-location">Trainingsort</label>
+                    <select
+                      id="session-location"
+                      value={sessionLocation}
+                      onChange={(event) =>
+                        setSessionLocation(event.target.value)
+                      }
+                    >
+                      <option>Platz</option>
+                      <option>Halle</option>
+                      <option>Kleinfeld</option>
+                    </select>
+                  </div>
+
+                  <div className="field">
+                    <label htmlFor="session-equipment">Equipment</label>
+                    <input
+                      id="session-equipment"
+                      value={sessionEquipment}
+                      onChange={(event) =>
+                        setSessionEquipment(event.target.value)
+                      }
+                      placeholder="Hütchen, Leibchen, Tore"
+                    />
+                  </div>
+                </div>
+
+                <p className="helper">
+                  Die KI erstellt Warm-up, Schwerpunkt, Spielformen,
+                  Abschlussspiel und Cooldown passend zu deinem Thema.
+                </p>
+
+                <button
+                  type="button"
+                  className="generate-button"
+                  onClick={generateSessionPlan}
+                  disabled={sessionLoading}
+                >
+                  {sessionLoading && (
+                    <span className="button-spinner" aria-hidden="true" />
+                  )}
+                  {sessionLoading
+                    ? "Plan wird erstellt ..."
+                    : "✦ Trainingsplan generieren"}
+                </button>
+              </div>
+            ) : (
+              <div className="form-content">
+                <div className="field-grid">
+                  <div className="field">
+                    <label htmlFor="home-duration">Dauer</label>
+                    <select
+                      id="home-duration"
+                      value={homeDuration}
+                      onChange={(event) =>
+                        setHomeDuration(Number(event.target.value))
+                      }
+                    >
+                      <option value={10}>10 Minuten</option>
+                      <option value={15}>15 Minuten</option>
+                      <option value={20}>20 Minuten</option>
+                      <option value={25}>25 Minuten</option>
+                      <option value={30}>30 Minuten</option>
+                    </select>
+                  </div>
+
+                  <div className="field">
+                    <label htmlFor="home-focus">Fokus</label>
+                    <select
+                      id="home-focus"
+                      value={homeFocus}
+                      onChange={(event) => setHomeFocus(event.target.value)}
+                    >
+                      <option>Angriff</option>
+                      <option>Ballkontrolle</option>
+                      <option>Dribbling</option>
+                      <option>Passspiel</option>
+                      <option>Koordination</option>
+                      <option>Athletik</option>
+                      <option>Stabilität</option>
+                    </select>
+                  </div>
+
+                  <div className="field">
+                    <label htmlFor="home-level">Level</label>
+                    <select
+                      id="home-level"
+                      value={homeLevel}
+                      onChange={(event) => setHomeLevel(event.target.value)}
+                    >
+                      <option>Beginner</option>
+                      <option>Intermediate</option>
+                      <option>Advanced</option>
+                    </select>
+                  </div>
+
+                  <div className="field">
+                    <label htmlFor="home-location">Ort</label>
+                    <select
+                      id="home-location"
+                      value={homeLocation}
+                      onChange={(event) =>
+                        setHomeLocation(event.target.value)
+                      }
+                    >
+                      <option>Zuhause</option>
+                      <option>Garten</option>
+                      <option>Platz</option>
+                      <option>Halle</option>
+                    </select>
+                  </div>
+
+                  <div className="field full">
+                    <label htmlFor="home-equipment">
+                      Verfügbares Equipment
+                    </label>
+                    <input
+                      id="home-equipment"
+                      value={homeEquipment}
+                      onChange={(event) =>
+                        setHomeEquipment(event.target.value)
+                      }
+                      placeholder="z. B. Nur Ball, Ball und Hütchen"
+                    />
+                  </div>
+                </div>
+
+                <p className="helper">
+                  Ideal als kleine Trainingsaufgabe zwischen zwei Teamtrainings.
+                  Warm-up, Hauptteil und Finisher sind bereits eingeplant.
+                </p>
+
+                <button
+                  type="button"
+                  className="generate-button"
+                  onClick={generateHomeWorkout}
+                  disabled={homeLoading}
+                >
+                  {homeLoading && (
+                    <span className="button-spinner" aria-hidden="true" />
+                  )}
+                  {homeLoading
+                    ? "Workout wird erstellt ..."
+                    : "✦ Home-Workout generieren"}
+                </button>
+              </div>
+            )}
+
+            {currentError && (
+              <div className="error-box" role="alert">
+                <strong>Das hat noch nicht geklappt:</strong>
+                <br />
+                {currentError}
+              </div>
+            )}
+          </section>
+
+          <section className="panel print-plan">
+            <div className="panel-header no-print">
               <div>
-                <div className="empty-icon">
+                <p className="panel-kicker">Dein Ergebnis</p>
+                <h2>{isSessionTab ? "Trainingsplan" : "Home-Workout"}</h2>
+              </div>
+
+              {hasCurrentPlan && (
+                <div className="result-actions">
+                  <button
+                    type="button"
+                    className="icon-button"
+                    onClick={openSaveDialog}
+                    title="Plan speichern"
+                  >
+                    ♡ <span>Speichern</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    className="icon-button"
+                    onClick={printPlan}
+                    title="Plan drucken oder als PDF speichern"
+                  >
+                    ⎙ <span>Drucken</span>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {!hasCurrentPlan && !currentLoading && (
+              <div className="empty-state">
+                <div>
+                  <div className="empty-icon" aria-hidden="true">
+                    ✦
+                  </div>
+                  <h3>Bereit für deinen Plan</h3>
+                  <p>
+                    Wähle links die Parameter und lass dir einen strukturierten
+                    Trainingsplan erstellen.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {currentLoading && (
+              <div className="empty-state">
+                <div>
+                  <div className="empty-icon">
+                    <span className="button-spinner" aria-hidden="true" />
+                  </div>
+                  <h3>Dein Plan entsteht</h3>
+                  <p>
+                    Die KI sortiert Übungen, Dauer und Coaching-Punkte für deine
+                    Einheit.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {isSessionTab && sessionPlan && !currentLoading && (
+              <PlanView
+                plan={sessionPlan}
+                focus={sessionFocus}
+                planType="team"
+              />
+            )}
+
+            {!isSessionTab && homeWorkout && !currentLoading && (
+              <PlanView
+                plan={homeWorkout}
+                focus={homeFocus}
+                planType="home"
+              />
+            )}
+          </section>
+        </section>
+      )}
+
+      {saveDialogOpen && (
+        <div
+          className="modal-backdrop no-print"
+          role="presentation"
+          onMouseDown={() => {
+            if (!saveLoading) setSaveDialogOpen(false);
+          }}
+        >
+          <section
+            className="save-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="save-dialog-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <p className="panel-kicker">Plan speichern</p>
+            <h2 id="save-dialog-title">Gib deinem Plan einen Namen</h2>
+            <p>
+              Du kannst ihn später unter „Meine Pläne“ öffnen, drucken oder
+              erneut verwenden.
+            </p>
+
+            <div className="field">
+              <label htmlFor="save-plan-title">Planname</label>
+              <input
+                id="save-plan-title"
+                value={saveTitle}
+                maxLength={120}
+                autoFocus
+                onChange={(event) => setSaveTitle(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    void saveCurrentPlan();
+                  }
+                }}
+              />
+            </div>
+
+            {saveError && (
+              <div className="error-box modal-error" role="alert">
+                {saveError}
+              </div>
+            )}
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setSaveDialogOpen(false)}
+                disabled={saveLoading}
+              >
+                Abbrechen
+              </button>
+
+              <button
+                type="button"
+                className="generate-button modal-save-button"
+                onClick={() => void saveCurrentPlan()}
+                disabled={saveLoading}
+              >
+                {saveLoading && (
                   <span className="button-spinner" aria-hidden="true" />
-                </div>
-                <h3>Dein Plan entsteht</h3>
-                <p>
-                  Die KI sortiert Übungen, Dauer und Coaching-Punkte für deine
-                  Einheit.
-                </p>
-              </div>
+                )}
+                {saveLoading ? "Speichert ..." : "Plan speichern"}
+              </button>
             </div>
-          )}
-
-          {isSessionTab && sessionPlan && !loading && (
-            <div className="result-content">
-              <div className="result-heading">
-                <h3>{sessionPlan.title}</h3>
-                <div className="result-meta">
-                  <span className="meta-chip">
-                    ⏱ {sessionPlan.duration_min} Min
-                  </span>
-                  <span className="meta-chip">
-                    ↻ {sessionPlan.frequency_per_week}× / Woche
-                  </span>
-                  <span className="meta-chip">⚽ {sessionFocus}</span>
-                </div>
-              </div>
-
-              <div className="phase-list">
-                {sessionPlan.phases.map((phase, phaseIndex) => (
-                  <article
-                    className="phase-card"
-                    key={`${phase.name}-${phaseIndex}`}
-                  >
-                    <div className="phase-header">
-                      <div className="phase-title">
-                        <span className="phase-index">{phaseIndex + 1}</span>
-                        {phase.name}
-                      </div>
-                      <span className="time-chip">
-                        {phase.duration_min} Min
-                      </span>
-                    </div>
-
-                    <div className="exercise-list">
-                      {phase.exercises.map((exercise, exerciseIndex) => (
-                        <div
-                          className="exercise"
-                          key={`${exercise.name}-${exerciseIndex}`}
-                        >
-                          <div className="exercise-name">
-                            <span>{exercise.name}</span>
-                            <span className="exercise-time">
-                              {exercise.duration_min} Min
-                            </span>
-                          </div>
-                          <p>
-                            <strong>Ziel:</strong> {exercise.objective}
-                          </p>
-                          <p>
-                            <strong>Organisation:</strong>{" "}
-                            {exercise.organization}
-                          </p>
-                          <p>
-                            <strong>Coaching:</strong>{" "}
-                            {exercise.coaching_points}
-                          </p>
-                          <p>
-                            <strong>Material:</strong> {exercise.equipment}
-                          </p>
-                        </div>
-                      ))}
-                    </div>
-                  </article>
-                ))}
-              </div>
-
-              <p className="footer-note">
-                KI-Vorschlag: Passe Belastung, Gruppengröße und Übungen stets
-                an deine Mannschaft und die Tagesform an.
-              </p>
-            </div>
-          )}
-
-          {!isSessionTab && homeWorkout && !loading && (
-            <div className="result-content">
-              <div className="result-heading">
-                <h3>{homeWorkout.title}</h3>
-                <div className="result-meta">
-                  <span className="meta-chip">
-                    ⏱ {homeWorkout.duration_min} Min
-                  </span>
-                  <span className="meta-chip">⚽ {homeWorkout.focus}</span>
-                  <span className="meta-chip">⌂ {homeLocation}</span>
-                </div>
-              </div>
-
-              <div className="phase-list">
-                {homeWorkout.blocks.map((block, blockIndex) => (
-                  <article
-                    className="phase-card"
-                    key={`${block.name}-${blockIndex}`}
-                  >
-                    <div className="phase-header">
-                      <div className="phase-title">
-                        <span className="phase-index">{blockIndex + 1}</span>
-                        {block.name}
-                      </div>
-                      <span className="time-chip">
-                        {block.duration_min} Min
-                      </span>
-                    </div>
-
-                    <div className="exercise-list">
-                      {block.exercises.map((exercise, exerciseIndex) => (
-                        <div
-                          className="exercise"
-                          key={`${exercise.name}-${exerciseIndex}`}
-                        >
-                          <div className="exercise-name">
-                            <span>{exercise.name}</span>
-                            <span className="exercise-time">
-                              {exercise.duration_min
-                                ? `${exercise.duration_min} Min`
-                                : exercise.sets_reps || "Übung"}
-                            </span>
-                          </div>
-                          <p>
-                            <strong>Ziel:</strong> {exercise.objective}
-                          </p>
-                          <p>
-                            <strong>Ausführung:</strong> {exercise.how_to}
-                          </p>
-                          <p>
-                            <strong>Material:</strong> {exercise.equipment}
-                          </p>
-                          <p>
-                            <strong>Level:</strong> {exercise.difficulty}
-                          </p>
-                        </div>
-                      ))}
-                    </div>
-                  </article>
-                ))}
-              </div>
-
-              <p className="footer-note">
-                KI-Vorschlag: Bei Schmerzen, Schwindel oder Verletzung die
-                Einheit abbrechen und fachlichen Rat einholen.
-              </p>
-            </div>
-          )}
-        </section>
-      </section>
+          </section>
+        </div>
+      )}
     </main>
   );
+}
+
+function PlanView({
+  plan,
+  focus,
+  planType,
+}: {
+  plan: SessionPlan | HomeWorkout;
+  focus: string;
+  planType: "team" | "home";
+}) {
+  if (planType === "team" && isSessionPlan(plan)) {
+    return (
+      <div className="result-content">
+        <div className="result-heading">
+          <h3>{plan.title}</h3>
+          <div className="result-meta">
+            <span className="meta-chip">⏱ {plan.duration_min} Min</span>
+            <span className="meta-chip">
+              ↻ {plan.frequency_per_week}× / Woche
+            </span>
+            <span className="meta-chip">⚽ {focus}</span>
+          </div>
+        </div>
+
+        <div className="phase-list">
+          {plan.phases.map((phase, phaseIndex) => (
+            <article className="phase-card" key={`${phase.name}-${phaseIndex}`}>
+              <div className="phase-header">
+                <div className="phase-title">
+                  <span className="phase-index">{phaseIndex + 1}</span>
+                  {phase.name}
+                </div>
+                <span className="time-chip">{phase.duration_min} Min</span>
+              </div>
+
+              <div className="exercise-list">
+                {phase.exercises.map((exercise, exerciseIndex) => (
+                  <div
+                    className="exercise"
+                    key={`${exercise.name}-${exerciseIndex}`}
+                  >
+                    <div className="exercise-name">
+                      <span>{exercise.name}</span>
+                      <span className="exercise-time">
+                        {exercise.duration_min} Min
+                      </span>
+                    </div>
+                    <p>
+                      <strong>Ziel:</strong> {exercise.objective}
+                    </p>
+                    <p>
+                      <strong>Organisation:</strong> {exercise.organization}
+                    </p>
+                    <p>
+                      <strong>Coaching:</strong> {exercise.coaching_points}
+                    </p>
+                    <p>
+                      <strong>Material:</strong> {exercise.equipment}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </article>
+          ))}
+        </div>
+
+        <p className="footer-note">
+          KI-Vorschlag: Passe Belastung, Gruppengröße und Übungen stets an deine
+          Mannschaft und die Tagesform an.
+        </p>
+      </div>
+    );
+  }
+
+  if (planType === "home" && !isSessionPlan(plan)) {
+    return (
+      <div className="result-content">
+        <div className="result-heading">
+          <h3>{plan.title}</h3>
+          <div className="result-meta">
+            <span className="meta-chip">⏱ {plan.duration_min} Min</span>
+            <span className="meta-chip">⚽ {plan.focus || focus}</span>
+          </div>
+        </div>
+
+        <div className="phase-list">
+          {plan.blocks.map((block, blockIndex) => (
+            <article className="phase-card" key={`${block.name}-${blockIndex}`}>
+              <div className="phase-header">
+                <div className="phase-title">
+                  <span className="phase-index">{blockIndex + 1}</span>
+                  {block.name}
+                </div>
+                <span className="time-chip">{block.duration_min} Min</span>
+              </div>
+
+              <div className="exercise-list">
+                {block.exercises.map((exercise, exerciseIndex) => (
+                  <div
+                    className="exercise"
+                    key={`${exercise.name}-${exerciseIndex}`}
+                  >
+                    <div className="exercise-name">
+                      <span>{exercise.name}</span>
+                      <span className="exercise-time">
+                        {exercise.duration_min
+                          ? `${exercise.duration_min} Min`
+                          : exercise.sets_reps || "Übung"}
+                      </span>
+                    </div>
+                    <p>
+                      <strong>Ziel:</strong> {exercise.objective}
+                    </p>
+                    <p>
+                      <strong>Ausführung:</strong> {exercise.how_to}
+                    </p>
+                    <p>
+                      <strong>Material:</strong> {exercise.equipment}
+                    </p>
+                    <p>
+                      <strong>Level:</strong> {exercise.difficulty}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </article>
+          ))}
+        </div>
+
+        <p className="footer-note">
+          KI-Vorschlag: Bei Schmerzen, Schwindel oder Verletzung die Einheit
+          abbrechen und fachlichen Rat einholen.
+        </p>
+      </div>
+    );
+  }
+
+  return null;
 }

@@ -1,6 +1,8 @@
-export const metadata = {
+import type { Metadata } from "next";
+
+export const metadata: Metadata = {
   title: "Football AI Coach",
-  description: "90-Min-Teamtraining und Mini-Home-Workouts per KI",
+  description: "KI-Trainingspläne für Fußballtrainer",
 };
 
 export default function RootLayout({

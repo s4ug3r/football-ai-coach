@@ -35,7 +35,7 @@ export default function LoginPage() {
         if (signUpError) throw signUpError;
 
         setMessage(
-          "Account erstellt. Prüfe jetzt dein E-Mail-Postfach und bestätige deine Adresse."
+          "Trainer-Account erstellt. Prüfe jetzt dein E-Mail-Postfach und bestätige deine Adresse."
         );
       } else {
         const { error: signInError } =
@@ -158,9 +158,20 @@ export default function LoginPage() {
           </button>
         </form>
 
-        <p className="auth-footnote">
-          Mit der Registrierung verwendest du Matchplan AI als Trainer.
-        </p>
+        {mode === "login" && (
+          <p className="auth-footnote">
+            Du bist Spieler? Bitte registriere dich über den{" "}
+            <strong>Einladungs-Link deines Trainers</strong>.
+          </p>
+        )}
+
+        {mode === "signup" && (
+          <p className="auth-footnote">
+            Hinweis: Diese Registrierung ist nur für{" "}
+            <strong>Trainer</strong>. Spieler registrieren sich über den
+            Einladungs-Link ihres Trainers.
+          </p>
+        )}
       </section>
     </main>
   );

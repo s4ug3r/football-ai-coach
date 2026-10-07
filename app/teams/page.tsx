@@ -218,7 +218,7 @@ export default function TeamsPage() {
 
     const invitationId = (data as Invitation).id;
     const baseUrl = window.location.origin;
-    const link = `${baseUrl}/signup?invite=${invitationId}`;
+    const link = `${baseUrl}/signup-player?invite=${invitationId}`;
 
     setInvitationLink(link);
     setSelectedTeamForInvite(team);

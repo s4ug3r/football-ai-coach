@@ -1,125 +1,230 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "../../lib/supabase/client";
+
+type Invitation = {
+  id: string;
+  team_id: string;
+  created_by: string;
+  used: boolean;
+  expires_at: string | null;
+};
+
+type Team = {
+  id: string;
+  name: string;
+};
 
 function SignUpPlayerContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [fullName, setFullName] = useState("");
+
+  const [invitationId, setInvitationId] = useState<string | null>(null);
+  const [invitation, setInvitation] = useState<Invitation | null>(null);
+  const [teamName, setTeamName] = useState<string | null>(null);
+
+  const [pageLoading, setPageLoading] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
-  const [invitationId, setInvitationId] = useState<string | null>(null);
-  const [teamName, setTeamName] = useState<string | null>(null);
 
   useEffect(() => {
     const inviteParam = searchParams.get("invite");
-    if (inviteParam) {
-      setInvitationId(inviteParam);
-      void loadInvitation(inviteParam);
+
+    if (!inviteParam) {
+      setError("Kein gültiger Einladungs-Link gefunden.");
+      setPageLoading(false);
+      return;
     }
+
+    setInvitationId(inviteParam);
+    void loadInvitation(inviteParam);
   }, [searchParams]);
 
   async function loadInvitation(id: string) {
-    const { data, error } = await supabase
-      .from("team_invitations")
-      .select(
-        `
-        id,
-        team_id,
-        team:team_id (
-          name
-        )
-      `
-      )
-      .eq("id", id)
-      .single();
+    setPageLoading(true);
+    setError(null);
 
-    if (error || !data) {
-      setError("Ungültiger oder abgelaufener Einladungs-Link.");
+    const { data, error: invitationError } = await supabase
+      .from("team_invitations")
+      .select("id, team_id, created_by, used, expires_at")
+      .eq("id", id)
+      .maybeSingle();
+
+    if (invitationError) {
+      setError(`Einladung konnte nicht geladen werden: ${invitationError.message}`);
+      setPageLoading(false);
       return;
     }
 
-    const teamData = data.team as unknown as { name: string } | null;
-    setTeamName(teamData?.name ?? null);
+    if (!data) {
+      setError("Diese Einladung wurde nicht gefunden.");
+      setPageLoading(false);
+      return;
+    }
+
+    const loadedInvitation = data as Invitation;
+
+    if (loadedInvitation.used) {
+      setError("Diese Einladung wurde bereits verwendet.");
+      setPageLoading(false);
+      return;
+    }
+
+    if (
+      loadedInvitation.expires_at &&
+      new Date(loadedInvitation.expires_at) <= new Date()
+    ) {
+      setError("Diese Einladung ist abgelaufen.");
+      setPageLoading(false);
+      return;
+    }
+
+    const { data: teamData, error: teamError } = await supabase
+      .from("teams")
+      .select("id, name")
+      .eq("id", loadedInvitation.team_id)
+      .maybeSingle();
+
+    if (teamError) {
+      setError(`Team konnte nicht geladen werden: ${teamError.message}`);
+      setPageLoading(false);
+      return;
+    }
+
+    if (!teamData) {
+      setError("Das Team zu dieser Einladung wurde nicht gefunden.");
+      setPageLoading(false);
+      return;
+    }
+
+    const team = teamData as Team;
+
+    setInvitation(loadedInvitation);
+    setTeamName(team.name);
+    setPageLoading(false);
   }
 
   async function handleSignUp() {
-    setLoading(true);
     setError(null);
 
-    if (!invitationId) {
-      setError("Bitte registriere dich über einen Einladungs-Link deines Trainers.");
-      setLoading(false);
+    if (!invitationId || !invitation) {
+      setError("Diese Einladung ist nicht gültig.");
       return;
     }
 
-    const { data: authData, error: authError } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        data: {
-          full_name: fullName,
+    if (!fullName.trim() || !email.trim() || !password) {
+      setError("Bitte fülle alle Felder aus.");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const { data: authData, error: authError } = await supabase.auth.signUp({
+        email: email.trim(),
+        password,
+        options: {
+          emailRedirectTo: `${window.location.origin}/login`,
+          data: {
+            full_name: fullName.trim(),
+            role: "player",
+          },
         },
-      },
-    });
+      });
 
-    if (authError) {
-      setError(authError.message);
+      if (authError) {
+        throw authError;
+      }
+
+      const playerAuthUserId = authData.user?.id;
+
+      if (!playerAuthUserId) {
+        throw new Error(
+          "Der Spieler-Account konnte nicht erstellt werden. Bitte versuche es später erneut."
+        );
+      }
+
+      const { data: freshInvitation, error: freshInvitationError } =
+        await supabase
+          .from("team_invitations")
+          .select("id, team_id, created_by, used, expires_at")
+          .eq("id", invitationId)
+          .maybeSingle();
+
+      if (freshInvitationError || !freshInvitation) {
+        throw new Error(
+          "Die Einladung konnte nach der Registrierung nicht mehr geprüft werden."
+        );
+      }
+
+      const checkedInvitation = freshInvitation as Invitation;
+
+      if (checkedInvitation.used) {
+        throw new Error("Diese Einladung wurde inzwischen bereits verwendet.");
+      }
+
+      if (
+        checkedInvitation.expires_at &&
+        new Date(checkedInvitation.expires_at) <= new Date()
+      ) {
+        throw new Error("Diese Einladung ist inzwischen abgelaufen.");
+      }
+
+      const { error: playerError } = await supabase.from("players").insert({
+        coach_id: checkedInvitation.created_by,
+        team_id: checkedInvitation.team_id,
+        full_name: fullName.trim(),
+        position: null,
+        shirt_number: null,
+      });
+
+      if (playerError) {
+        throw playerError;
+      }
+
+      const { error: updateInvitationError } = await supabase
+        .from("team_invitations")
+        .update({
+          used: true,
+          used_by: playerAuthUserId,
+          used_at: new Date().toISOString(),
+        })
+        .eq("id", invitationId)
+        .eq("used", false);
+
+      if (updateInvitationError) {
+        throw updateInvitationError;
+      }
+
+      setSuccess(true);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Die Spieler-Registrierung konnte nicht abgeschlossen werden."
+      );
+    } finally {
       setLoading(false);
-      return;
     }
+  }
 
-    const userId = authData.user?.id;
-    if (!userId) {
-      setError("Registrierung fehlgeschlagen.");
-      setLoading(false);
-      return;
-    }
-
-    const { data: invitationData } = await supabase
-      .from("team_invitations")
-      .select("team_id")
-      .eq("id", invitationId)
-      .single();
-
-    if (!invitationData) {
-      setError("Einladungs-Link ungültig.");
-      setLoading(false);
-      return;
-    }
-
-    const { error: playerError } = await supabase.from("players").insert({
-      coach_id: userId,
-      team_id: (invitationData as { team_id: string }).team_id,
-      full_name: fullName,
-      position: null,
-      shirt_number: null,
-    });
-
-    if (playerError) {
-      setError(playerError.message);
-      setLoading(false);
-      return;
-    }
-
-    await supabase
-      .from("team_invitations")
-      .update({
-        used: true,
-        used_by: userId,
-        used_at: new Date().toISOString(),
-      })
-      .eq("id", invitationId);
-
-    setSuccess(true);
-    setLoading(false);
+  if (pageLoading) {
+    return (
+      <main className="auth-shell">
+        <section className="auth-card auth-loading">
+          <span className="button-spinner" aria-hidden="true" />
+          <p>Einladung wird geprüft …</p>
+        </section>
+      </main>
+    );
   }
 
   if (success) {
@@ -127,18 +232,23 @@ function SignUpPlayerContent() {
       <main className="auth-shell">
         <section className="auth-card">
           <a className="auth-brand" href="/">
-            <span className="brand-mark" aria-hidden="true">⚽</span>
+            <span className="brand-mark" aria-hidden="true">
+              ⚽
+            </span>
             <span>
               <strong>MATCHPLAN AI</strong>
               <small>Spieler</small>
             </span>
           </a>
 
+          <p className="eyebrow">Spieler-Account erstellt</p>
           <h1>Fast geschafft!</h1>
-          <p>
-            Du hast dich erfolgreich registriert. Bitte bestätige deine
-            E-Mail-Adresse, bevor du dich einloggst.
+          <p className="auth-intro">
+            Dein Account wurde erstellt. Bitte bestätige jetzt deine
+            E-Mail-Adresse über den Link in deinem Postfach. Danach kannst du
+            dich einloggen und deine Workouts sehen.
           </p>
+
           <button
             type="button"
             className="generate-button"
@@ -151,11 +261,15 @@ function SignUpPlayerContent() {
     );
   }
 
+  const invitationIsValid = Boolean(invitation && teamName);
+
   return (
     <main className="auth-shell">
       <section className="auth-card">
         <a className="auth-brand" href="/">
-          <span className="brand-mark" aria-hidden="true">⚽</span>
+          <span className="brand-mark" aria-hidden="true">
+            ⚽
+          </span>
           <span>
             <strong>MATCHPLAN AI</strong>
             <small>Spieler</small>
@@ -164,76 +278,88 @@ function SignUpPlayerContent() {
 
         <p className="eyebrow">Spieler-Registrierung</p>
         <h1>Team beitreten</h1>
-        
-        {teamName ? (
+
+        {invitationIsValid ? (
           <p className="auth-intro">
-            Du wurdest eingeladen, dem Team <strong>{teamName}</strong> beizutreten.
+            Du wurdest eingeladen, dem Team <strong>{teamName}</strong>{" "}
+            beizutreten. Erstelle deinen Spieler-Account.
           </p>
         ) : (
           <p className="auth-intro">
-            Bitte registriere dich über den Einladungs-Link deines Trainers.
+            Bitte registriere dich über einen gültigen Einladungs-Link deines
+            Trainers.
           </p>
         )}
 
         {error && (
-          <div className="error-box" role="alert">
+          <div className="error-box auth-message" role="alert">
             {error}
           </div>
         )}
 
-        {!invitationId && (
-          <div className="error-box" role="alert">
-            Kein gültiger Einladungs-Link gefunden.
-          </div>
-        )}
-
-        <form onSubmit={(e) => { e.preventDefault(); void handleSignUp(); }}>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            void handleSignUp();
+          }}
+        >
           <div className="field">
-            <label htmlFor="signup-name">Vollständiger Name</label>
+            <label htmlFor="signup-player-name">Vollständiger Name</label>
             <input
-              id="signup-name"
+              id="signup-player-name"
               value={fullName}
-              onChange={(e) => setFullName(e.target.value)}
+              onChange={(event) => setFullName(event.target.value)}
               placeholder="Max Mustermann"
-              disabled={!invitationId}
+              autoComplete="name"
+              disabled={!invitationIsValid || loading}
               required
             />
           </div>
 
           <div className="field">
-            <label htmlFor="signup-email">E-Mail</label>
+            <label htmlFor="signup-player-email">E-Mail-Adresse</label>
             <input
-              id="signup-email"
+              id="signup-player-email"
               type="email"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(event) => setEmail(event.target.value)}
               placeholder="max@beispiel.de"
-              disabled={!invitationId}
+              autoComplete="email"
+              disabled={!invitationIsValid || loading}
               required
             />
           </div>
 
           <div className="field">
-            <label htmlFor="signup-password">Passwort</label>
+            <label htmlFor="signup-player-password">Passwort</label>
             <input
-              id="signup-password"
+              id="signup-player-password"
               type="password"
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Mind. 6 Zeichen"
-              minLength={6}
-              disabled={!invitationId}
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder="Mindestens 8 Zeichen"
+              minLength={8}
+              autoComplete="new-password"
+              disabled={!invitationIsValid || loading}
               required
             />
           </div>
 
           <button
             className="generate-button"
-            disabled={loading || !invitationId || !email || !password || !fullName}
+            disabled={
+              loading ||
+              !invitationIsValid ||
+              !fullName.trim() ||
+              !email.trim() ||
+              password.length < 8
+            }
             type="submit"
           >
-            {loading && <span className="button-spinner" aria-hidden="true" />}
-            {loading ? "Wird erstellt ..." : "Account erstellen"}
+            {loading && (
+              <span className="button-spinner" aria-hidden="true" />
+            )}
+            {loading ? "Account wird erstellt ..." : "Account erstellen"}
           </button>
         </form>
 
@@ -247,14 +373,16 @@ function SignUpPlayerContent() {
 
 export default function SignUpPlayerPage() {
   return (
-    <Suspense fallback={
-      <main className="auth-shell">
-        <section className="auth-card auth-loading">
-          <span className="button-spinner" aria-hidden="true" />
-          <p>Wird geladen …</p>
-        </section>
-      </main>
-    }>
+    <Suspense
+      fallback={
+        <main className="auth-shell">
+          <section className="auth-card auth-loading">
+            <span className="button-spinner" aria-hidden="true" />
+            <p>Spieler-Registrierung wird geladen …</p>
+          </section>
+        </main>
+      }
+    >
       <SignUpPlayerContent />
     </Suspense>
   );

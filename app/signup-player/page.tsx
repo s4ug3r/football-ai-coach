@@ -46,7 +46,8 @@ export default function SignUpPlayerPage() {
       return;
     }
 
-    setTeamName((data.team as { name: string })?.name ?? null);
+    const teamData = data.team as unknown as { name: string } | null;
+    setTeamName(teamData?.name ?? null);
   }
 
   async function handleSignUp() {

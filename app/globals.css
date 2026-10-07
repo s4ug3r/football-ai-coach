@@ -1604,3 +1604,134 @@ select:focus-visible {
     width: 100%;
   }
 }
+
+.teams-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.team-card {
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(4, 17, 10, 0.38);
+}
+
+.team-card-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+
+.team-card h3 {
+  margin: 0 0 6px;
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.team-age {
+  display: inline-block;
+  padding: 3px 8px;
+  border: 1px solid rgba(215, 255, 114, 0.22);
+  border-radius: 999px;
+  color: #d6eadc;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.invite-button {
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid rgba(215, 255, 114, 0.38);
+  border-radius: 10px;
+  color: #0a2814;
+  background: linear-gradient(135deg, var(--accent), var(--primary));
+  font-size: 12px;
+  font-weight: 900;
+  transition: 160ms ease;
+}
+
+.invite-button:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.06);
+}
+
+.team-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 14px;
+  color: var(--subtle);
+  font-size: 12px;
+}
+
+.invite-active {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.team-players {
+  border-top: 1px solid rgba(187, 255, 205, 0.08);
+  padding-top: 12px;
+}
+
+.player-row {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 8px 0;
+}
+
+.player-number {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 8px;
+  color: #062111;
+  background: var(--accent);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.player-name {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.player-name strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.player-name small {
+  color: var(--subtle);
+  font-size: 11px;
+}
+
+.invite-link-box {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(4, 17, 10, 0.48);
+  margin: 16px 0;
+}
+
+.invite-link-box code {
+  flex: 1;
+  overflow: hidden;
+  color: var(--accent);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

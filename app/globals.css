@@ -599,3 +599,131 @@ select:focus-visible {
     margin-right: 17px;
   }
 }
+
+.auth-shell {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(circle at 15% 10%, rgba(116, 245, 161, 0.17), transparent 28rem),
+    radial-gradient(circle at 86% 88%, rgba(215, 255, 114, 0.1), transparent 28rem),
+    var(--bg-deep);
+}
+
+.auth-card {
+  width: min(100%, 465px);
+  padding: 32px;
+  border: 1px solid var(--border);
+  border-radius: 26px;
+  background: linear-gradient(160deg, rgba(21, 48, 35, 0.96), rgba(8, 24, 17, 0.97));
+  box-shadow: var(--shadow);
+}
+
+.auth-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 11px;
+  margin-bottom: 34px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.auth-brand strong,
+.auth-brand small {
+  display: block;
+}
+
+.auth-brand strong {
+  font-size: 14px;
+  letter-spacing: 0.04em;
+}
+
+.auth-brand small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.auth-card h1 {
+  margin: 0;
+  font-size: 30px;
+  letter-spacing: -0.04em;
+}
+
+.auth-intro {
+  margin: 12px 0 24px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.auth-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px;
+  margin: 0 0 24px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: rgba(3, 13, 8, 0.46);
+}
+
+.auth-switch button {
+  min-height: 39px;
+  border: 0;
+  border-radius: 9px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.auth-switch button.active {
+  color: #052111;
+  background: var(--primary);
+}
+
+.auth-message {
+  margin: 16px 0 0;
+}
+
+.success-box {
+  padding: 13px 14px;
+  border: 1px solid rgba(116, 245, 161, 0.35);
+  border-radius: 12px;
+  color: #d8ffe5;
+  background: rgba(26, 139, 69, 0.22);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.auth-footnote {
+  margin: 18px 0 0;
+  color: var(--subtle);
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.auth-loading {
+  display: grid;
+  min-height: 180px;
+  place-items: center;
+  gap: 12px;
+  text-align: center;
+}
+
+.logout-button {
+  border: 1px solid var(--border);
+}
+
+.logout-button:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+@media (max-width: 500px) {
+  .auth-card {
+    padding: 24px 20px;
+  }
+}

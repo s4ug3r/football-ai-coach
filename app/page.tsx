@@ -1,6 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+import type { ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "../lib/supabase/client";
 
@@ -78,27 +84,176 @@ type Player = {
   shirt_number: number | null;
 };
 
-function getErrorMessage(error: unknown) {
+type SaveDraft = {
+  plan: SessionPlan | HomeWorkout;
+  planType: "team" | "home";
+  focus: string;
+};
+
+type SelectOption = {
+  value: string | number;
+  label: string;
+};
+
+function getErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
+
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof error.message === "string"
+  ) {
+    return error.message;
+  }
+
   return "Ein unbekannter Fehler ist aufgetreten.";
 }
 
-function formatDate(dateString: string) {
+function formatDate(value: string): string {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) return value;
+
   return new Intl.DateTimeFormat("de-DE", {
     day: "2-digit",
     month: "2-digit",
     year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(new Date(dateString));
+  }).format(date);
 }
 
-function isSessionPlan(plan: SessionPlan | HomeWorkout): plan is SessionPlan {
-  return "phases" in plan;
+function todayLocal(): string {
+  const date = new Date();
+
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
 }
 
-function getTodayDate() {
-  return new Date().toISOString().slice(0, 10);
+function isRecord(
+  value: unknown
+): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isSessionPlan(
+  value: SessionPlan | HomeWorkout
+): value is SessionPlan {
+  return "phases" in value;
+}
+
+function isValidGeneratedPlan(
+  value: unknown,
+  type: "team" | "home"
+): boolean {
+  if (
+    !isRecord(value) ||
+    typeof value.title !== "string" ||
+    typeof value.duration_min !== "number"
+  ) {
+    return false;
+  }
+
+  const sections = type === "team" ? value.phases : value.blocks;
+
+  return (
+    Array.isArray(sections) &&
+    sections.length > 0 &&
+    sections.every(
+      (section) =>
+        isRecord(section) &&
+        typeof section.name === "string" &&
+        Array.isArray(section.exercises)
+    )
+  );
+}
+
+function SelectField({
+  id,
+  label,
+  value,
+  options,
+  onChange,
+  disabled = false,
+}: {
+  id: string;
+  label: string;
+  value: string | number;
+  options: SelectOption[];
+  onChange: (value: string) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="field">
+      <label htmlFor={id}>{label}</label>
+
+      <select
+        id={id}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        disabled={disabled}
+      >
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+function Modal({
+  titleId,
+  onClose,
+  busy,
+  children,
+  extraClass = "",
+}: {
+  titleId: string;
+  onClose: () => void;
+  busy: boolean;
+  children: ReactNode;
+  extraClass?: string;
+}) {
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !busy) onClose();
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [busy, onClose]);
+
+  return (
+    <div
+      className="modal-backdrop no-print"
+      onMouseDown={() => {
+        if (!busy) onClose();
+      }}
+    >
+      <section
+        className={`save-modal ${extraClass}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onMouseDown={(event) => event.stopPropagation()}
+        style={{
+          maxHeight: "calc(100dvh - 40px)",
+          overflowY: "auto",
+        }}
+      >
+        {children}
+      </section>
+    </div>
+  );
 }
 
 export default function HomePage() {
@@ -108,6 +263,8 @@ export default function HomePage() {
   const [authLoading, setAuthLoading] = useState(true);
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [signingOut, setSigningOut] = useState(false);
 
   const [tab, setTab] = useState<Tab>("session");
 
@@ -126,207 +283,364 @@ export default function HomePage() {
   const [homeLocation, setHomeLocation] = useState("Zuhause");
   const [homeEquipment, setHomeEquipment] = useState("Nur Ball");
 
-  const [sessionPlan, setSessionPlan] = useState<SessionPlan | null>(null);
-  const [homeWorkout, setHomeWorkout] = useState<HomeWorkout | null>(null);
+  const [sessionPlan, setSessionPlan] =
+    useState<SessionPlan | null>(null);
+  const [homeWorkout, setHomeWorkout] =
+    useState<HomeWorkout | null>(null);
+
+  const [sessionPlanFocus, setSessionPlanFocus] =
+    useState("Angriff");
+  const [homePlanFocus, setHomePlanFocus] = useState("Angriff");
 
   const [sessionLoading, setSessionLoading] = useState(false);
   const [homeLoading, setHomeLoading] = useState(false);
-  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [sessionError, setSessionError] =
+    useState<string | null>(null);
   const [homeError, setHomeError] = useState<string | null>(null);
 
   const [savedPlans, setSavedPlans] = useState<SavedPlan[]>([]);
-  const [savedPlansLoading, setSavedPlansLoading] = useState(false);
-  const [savedPlansError, setSavedPlansError] = useState<string | null>(null);
+  const [savedPlansLoading, setSavedPlansLoading] =
+    useState(false);
+  const [savedPlansError, setSavedPlansError] =
+    useState<string | null>(null);
+  const [deleteLoadingId, setDeleteLoadingId] =
+    useState<string | null>(null);
 
-  const [saveDialogOpen, setSaveDialogOpen] = useState(false);
+  const [saveDraft, setSaveDraft] = useState<SaveDraft | null>(
+    null
+  );
   const [saveTitle, setSaveTitle] = useState("");
   const [saveLoading, setSaveLoading] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  const [deleteLoadingId, setDeleteLoadingId] = useState<string | null>(null);
-
-  const [assignDialogOpen, setAssignDialogOpen] = useState(false);
-  const [assignmentPlan, setAssignmentPlan] = useState<SavedPlan | null>(null);
+  const [assignmentPlan, setAssignmentPlan] =
+    useState<SavedPlan | null>(null);
   const [teams, setTeams] = useState<Team[]>([]);
+  const [teamsLoading, setTeamsLoading] = useState(false);
   const [assignmentTeamId, setAssignmentTeamId] = useState("");
   const [teamPlayers, setTeamPlayers] = useState<Player[]>([]);
-  const [selectedPlayerIds, setSelectedPlayerIds] = useState<string[]>([]);
+  const [playersLoading, setPlayersLoading] = useState(false);
+  const [selectedPlayerIds, setSelectedPlayerIds] = useState<
+    string[]
+  >([]);
   const [dueDate, setDueDate] = useState("");
   const [assignLoading, setAssignLoading] = useState(false);
-  const [assignError, setAssignError] = useState<string | null>(null);
-  const [assignmentSuccess, setAssignmentSuccess] = useState<string | null>(
+  const [assignError, setAssignError] = useState<string | null>(
     null
   );
+  const [assignmentSuccess, setAssignmentSuccess] =
+    useState<string | null>(null);
 
   const isSessionTab = tab === "session";
-  const isSavedTab = tab === "saved";
+  const currentPlan = isSessionTab ? sessionPlan : homeWorkout;
+  const currentLoading = isSessionTab
+    ? sessionLoading
+    : homeLoading;
+  const currentError = isSessionTab ? sessionError : homeError;
 
   useEffect(() => {
-    let mounted = true;
+    let active = true;
 
-    async function loadAuthenticatedUser() {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
+    async function checkUser() {
+      try {
+        const {
+          data: { user },
+          error,
+        } = await supabase.auth.getUser();
 
-      if (!mounted) return;
+        if (!active) return;
 
-      if (!user) {
-        router.replace("/login");
-        return;
+        if (error || !user) {
+          router.replace("/login");
+          return;
+        }
+
+        if (user.user_metadata?.role === "player") {
+          router.replace("/meine-aufgaben");
+          return;
+        }
+
+        setUserId(user.id);
+        setUserEmail(user.email ?? null);
+        setAuthLoading(false);
+      } catch (error) {
+        if (!active) return;
+
+        setAuthError(getErrorMessage(error));
+        setAuthLoading(false);
       }
-
-      setUserId(user.id);
-      setUserEmail(user.email ?? null);
-      setAuthLoading(false);
     }
 
-    void loadAuthenticatedUser();
+    void checkUser();
 
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!active) return;
+
       if (!session?.user) {
+        setUserId(null);
+        setSavedPlans([]);
         router.replace("/login");
+        return;
+      }
+
+      if (session.user.user_metadata?.role === "player") {
+        router.replace("/meine-aufgaben");
         return;
       }
 
       setUserId(session.user.id);
       setUserEmail(session.user.email ?? null);
-      setAuthLoading(false);
     });
 
     return () => {
-      mounted = false;
+      active = false;
       subscription.unsubscribe();
     };
   }, [router, supabase]);
+
+  const loadSavedPlans = useCallback(async () => {
+    if (!userId) return;
+
+    setSavedPlansLoading(true);
+    setSavedPlansError(null);
+
+    try {
+      const { data, error } = await supabase
+        .from("training_plans")
+        .select(
+          "id, user_id, title, plan_type, focus, duration_min, plan_data, created_at"
+        )
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false });
+
+      if (error) throw error;
+
+      setSavedPlans((data ?? []) as SavedPlan[]);
+    } catch (error) {
+      setSavedPlansError(getErrorMessage(error));
+    } finally {
+      setSavedPlansLoading(false);
+    }
+  }, [supabase, userId]);
 
   useEffect(() => {
     if (tab === "saved" && userId) {
       void loadSavedPlans();
     }
-  }, [tab, userId]);
+  }, [tab, userId, loadSavedPlans]);
 
   useEffect(() => {
-    if (assignmentTeamId) {
-      void loadPlayersForAssignment(assignmentTeamId);
-    } else {
+    if (!assignmentPlan || !userId) return;
+
+    let active = true;
+
+    async function loadTeams() {
+      setTeamsLoading(true);
+      setTeams([]);
+
+      try {
+        const { data, error } = await supabase
+          .from("teams")
+          .select("id, coach_id, name, age_group")
+          .eq("coach_id", userId)
+          .order("created_at", { ascending: true });
+
+        if (!active) return;
+        if (error) throw error;
+
+        setTeams((data ?? []) as Team[]);
+      } catch (error) {
+        if (active) {
+          setAssignError(getErrorMessage(error));
+        }
+      } finally {
+        if (active) setTeamsLoading(false);
+      }
+    }
+
+    void loadTeams();
+
+    return () => {
+      active = false;
+    };
+  }, [assignmentPlan, userId, supabase]);
+
+  useEffect(() => {
+    if (!assignmentPlan || !assignmentTeamId || !userId) {
       setTeamPlayers([]);
       setSelectedPlayerIds([]);
-    }
-  }, [assignmentTeamId]);
-
-  async function signOut() {
-    await supabase.auth.signOut();
-    router.replace("/login");
-    router.refresh();
-  }
-
-  async function loadSavedPlans() {
-    setSavedPlansLoading(true);
-    setSavedPlansError(null);
-
-    const { data, error } = await supabase
-      .from("training_plans")
-      .select("*")
-      .order("created_at", { ascending: false });
-
-    if (error) {
-      setSavedPlansError(error.message);
-      setSavedPlansLoading(false);
+      setPlayersLoading(false);
       return;
     }
 
-    setSavedPlans((data ?? []) as SavedPlan[]);
-    setSavedPlansLoading(false);
-  }
+    let active = true;
 
-  async function generateSessionPlan() {
-    setSessionLoading(true);
-    setSessionError(null);
+    async function loadPlayers() {
+      setPlayersLoading(true);
+      setAssignError(null);
+      setTeamPlayers([]);
+      setSelectedPlayerIds([]);
+
+      try {
+        const { data, error } = await supabase
+          .from("players")
+          .select(
+            "id, team_id, coach_id, full_name, position, shirt_number"
+          )
+          .eq("coach_id", userId)
+          .eq("team_id", assignmentTeamId)
+          .order("shirt_number", {
+            ascending: true,
+            nullsFirst: false,
+          });
+
+        if (!active) return;
+        if (error) throw error;
+
+        const loadedPlayers = (data ?? []) as Player[];
+
+        setTeamPlayers(loadedPlayers);
+        setSelectedPlayerIds(
+          loadedPlayers.map((player) => player.id)
+        );
+      } catch (error) {
+        if (active) {
+          setAssignError(getErrorMessage(error));
+        }
+      } finally {
+        if (active) setPlayersLoading(false);
+      }
+    }
+
+    void loadPlayers();
+
+    return () => {
+      active = false;
+    };
+  }, [assignmentPlan, assignmentTeamId, userId, supabase]);
+
+  async function signOut() {
+    if (signingOut) return;
+
+    setSigningOut(true);
+    setAuthError(null);
 
     try {
-      const response = await fetch("/api/generate-session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const { error } = await supabase.auth.signOut();
+
+      if (error) throw error;
+
+      router.replace("/login");
+      router.refresh();
+    } catch (error) {
+      setAuthError(getErrorMessage(error));
+    } finally {
+      setSigningOut(false);
+    }
+  }
+
+  async function generatePlan(type: "team" | "home") {
+    const isTeam = type === "team";
+
+    if (isTeam ? sessionLoading : homeLoading) return;
+
+    if (isTeam) {
+      setSessionLoading(true);
+      setSessionError(null);
+    } else {
+      setHomeLoading(true);
+      setHomeError(null);
+    }
+
+    const requestedFocus = isTeam ? sessionFocus : homeFocus;
+
+    const payload = isTeam
+      ? {
           duration_min: sessionDuration,
           frequency_per_week: sessionFrequency,
           focus: sessionFocus,
           level: sessionLevel,
           location: sessionLocation,
           equipment: sessionEquipment,
-        }),
-      });
-
-      const json = await response.json();
-
-      if (!response.ok || !json.ok) {
-        throw new Error(
-          json.error || "Der Trainingsplan konnte nicht erstellt werden."
-        );
-      }
-
-      setSessionPlan(json.data as SessionPlan);
-    } catch (error) {
-      setSessionError(getErrorMessage(error));
-    } finally {
-      setSessionLoading(false);
-    }
-  }
-
-  async function generateHomeWorkout() {
-    setHomeLoading(true);
-    setHomeError(null);
-
-    try {
-      const response = await fetch("/api/generate-home", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+        }
+      : {
           duration_min: homeDuration,
           focus: homeFocus,
           level: homeLevel,
           location: homeLocation,
           equipment: homeEquipment,
-        }),
-      });
+        };
 
-      const json = await response.json();
+    try {
+      const response = await fetch(
+        isTeam ? "/api/generate-session" : "/api/generate-home",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }
+      );
 
-      if (!response.ok || !json.ok) {
+      const json: unknown = await response.json();
+
+      if (
+        !response.ok ||
+        !isRecord(json) ||
+        json.ok !== true
+      ) {
         throw new Error(
-          json.error || "Das Home-Workout konnte nicht erstellt werden."
+          isRecord(json) && typeof json.error === "string"
+            ? json.error
+            : "Der Plan konnte nicht erstellt werden."
         );
       }
 
-      setHomeWorkout(json.data as HomeWorkout);
+      if (!isValidGeneratedPlan(json.data, type)) {
+        throw new Error(
+          "Die KI-Antwort enthält keinen gültigen Trainingsplan. Bitte erneut versuchen."
+        );
+      }
+
+      if (isTeam) {
+        setSessionPlan(json.data as SessionPlan);
+        setSessionPlanFocus(requestedFocus);
+      } else {
+        setHomeWorkout(json.data as HomeWorkout);
+        setHomePlanFocus(requestedFocus);
+      }
     } catch (error) {
-      setHomeError(getErrorMessage(error));
+      if (isTeam) {
+        setSessionError(getErrorMessage(error));
+      } else {
+        setHomeError(getErrorMessage(error));
+      }
     } finally {
-      setHomeLoading(false);
+      if (isTeam) {
+        setSessionLoading(false);
+      } else {
+        setHomeLoading(false);
+      }
     }
   }
 
   function openSaveDialog() {
-    const plan = isSessionTab ? sessionPlan : homeWorkout;
+    if (!currentPlan || currentLoading) return;
 
-    if (!plan) return;
-
-    setSaveTitle(plan.title);
+    setSaveDraft({
+      plan: currentPlan,
+      planType: isSessionTab ? "team" : "home",
+      focus: isSessionTab ? sessionPlanFocus : homePlanFocus,
+    });
+    setSaveTitle(currentPlan.title);
     setSaveError(null);
-    setSaveDialogOpen(true);
   }
 
   async function saveCurrentPlan() {
-    const plan = isSessionTab ? sessionPlan : homeWorkout;
-    const title = saveTitle.trim();
+    if (!userId || !saveDraft || saveLoading) return;
 
-    if (!userId || !plan) {
-      setSaveError("Bitte erstelle zuerst einen Plan.");
-      return;
-    }
+    const title = saveTitle.trim();
 
     if (!title) {
       setSaveError("Bitte gib einen Namen für den Plan ein.");
@@ -336,111 +650,145 @@ export default function HomePage() {
     setSaveLoading(true);
     setSaveError(null);
 
-    const { error } = await supabase.from("training_plans").insert({
-      user_id: userId,
-      title,
-      plan_type: isSessionTab ? "team" : "home",
-      focus: isSessionTab ? sessionFocus : homeFocus,
-      duration_min: plan.duration_min,
-      plan_data: plan,
-    });
+    try {
+      const { error } = await supabase
+        .from("training_plans")
+        .insert({
+          user_id: userId,
+          title,
+          plan_type: saveDraft.planType,
+          focus: saveDraft.focus,
+          duration_min: saveDraft.plan.duration_min,
+          plan_data: {
+            ...saveDraft.plan,
+            title,
+          },
+        });
 
-    if (error) {
-      setSaveError(error.message);
+      if (error) throw error;
+
+      setSaveDraft(null);
+
+      if (tab === "saved") {
+        await loadSavedPlans();
+      } else {
+        setTab("saved");
+      }
+    } catch (error) {
+      setSaveError(getErrorMessage(error));
+    } finally {
       setSaveLoading(false);
-      return;
     }
-
-    setSaveDialogOpen(false);
-    setSaveLoading(false);
-    setTab("saved");
-    await loadSavedPlans();
   }
 
-  async function deleteSavedPlan(planId: string) {
+  async function deleteSavedPlan(plan: SavedPlan) {
+    if (!userId || deleteLoadingId) return;
+
     const confirmed = window.confirm(
-      "Möchtest du diesen gespeicherten Plan wirklich löschen?"
+      `„${plan.title}“ wirklich löschen?\n\n` +
+        "Zugehörige Zuweisungen und Rückmeldungen können durch die Datenbank-Verknüpfungen ebenfalls gelöscht werden."
     );
 
     if (!confirmed) return;
 
-    setDeleteLoadingId(planId);
+    setDeleteLoadingId(plan.id);
     setSavedPlansError(null);
 
-    const { error } = await supabase
-      .from("training_plans")
-      .delete()
-      .eq("id", planId);
+    try {
+      const { data, error } = await supabase
+        .from("training_plans")
+        .delete()
+        .eq("id", plan.id)
+        .eq("user_id", userId)
+        .select("id")
+        .maybeSingle();
 
-    if (error) {
-      setSavedPlansError(error.message);
+      if (error) throw error;
+
+      if (!data) {
+        throw new Error(
+          "Der Plan wurde nicht gelöscht. Bitte prüfe deine Berechtigung."
+        );
+      }
+
+      setSavedPlans((current) =>
+        current.filter((item) => item.id !== plan.id)
+      );
+    } catch (error) {
+      setSavedPlansError(getErrorMessage(error));
+    } finally {
       setDeleteLoadingId(null);
-      return;
     }
-
-    setSavedPlans((current) => current.filter((plan) => plan.id !== planId));
-    setDeleteLoadingId(null);
   }
 
-  function openSavedPlan(plan: SavedPlan) {
-    if (plan.plan_type === "team" && isSessionPlan(plan.plan_data)) {
-      setSessionPlan(plan.plan_data);
-      setSessionFocus(plan.focus);
+  function openSavedPlan(saved: SavedPlan) {
+    if (saved.plan_type === "team") {
+      if (!isSessionPlan(saved.plan_data)) {
+        setSavedPlansError(
+          "Dieser gespeicherte Teamplan hat ein ungültiges Format."
+        );
+        return;
+      }
+
+      setSessionPlan({
+        ...saved.plan_data,
+        title: saved.title,
+      });
+      setSessionFocus(saved.focus);
+      setSessionPlanFocus(saved.focus);
+      setSessionDuration(saved.duration_min);
+      setSessionFrequency(
+        saved.plan_data.frequency_per_week || 1
+      );
+      setSessionError(null);
       setTab("session");
       return;
     }
 
-    if (plan.plan_type === "home" && !isSessionPlan(plan.plan_data)) {
-      setHomeWorkout(plan.plan_data);
-      setHomeFocus(plan.focus);
-      setTab("home");
+    if (isSessionPlan(saved.plan_data)) {
+      setSavedPlansError(
+        "Dieses gespeicherte Home-Workout hat ein ungültiges Format."
+      );
+      return;
     }
+
+    setHomeWorkout({
+      ...saved.plan_data,
+      title: saved.title,
+    });
+    setHomeFocus(saved.focus);
+    setHomePlanFocus(saved.focus);
+    setHomeDuration(saved.duration_min);
+    setHomeError(null);
+    setTab("home");
   }
 
-  function printPlan() {
-    window.print();
-  }
-
-  async function openAssignDialog(plan: SavedPlan) {
-    setAssignmentPlan(plan);
+  function openAssignDialog(plan: SavedPlan) {
     setAssignmentTeamId("");
     setTeamPlayers([]);
     setSelectedPlayerIds([]);
     setDueDate("");
     setAssignError(null);
     setAssignmentSuccess(null);
-    setAssignDialogOpen(true);
-
-    const { data, error } = await supabase
-      .from("teams")
-      .select("id, coach_id, name, age_group")
-      .order("created_at", { ascending: true });
-
-    if (error) {
-      setAssignError(error.message);
-      return;
-    }
-
-    setTeams((data ?? []) as Team[]);
+    setTeams([]);
+    setAssignmentPlan(plan);
   }
 
-  async function loadPlayersForAssignment(teamId: string) {
+  function closeAssignDialog() {
+    if (assignLoading) return;
+
+    setAssignmentPlan(null);
+    setAssignmentTeamId("");
+    setTeamPlayers([]);
+    setSelectedPlayerIds([]);
+  }
+
+  function changeAssignmentTeam(teamId: string) {
+    setAssignmentTeamId(teamId);
+    setTeamPlayers([]);
+    setSelectedPlayerIds([]);
     setAssignError(null);
-
-    const { data, error } = await supabase
-      .from("players")
-      .select("id, team_id, coach_id, full_name, position, shirt_number")
-      .eq("team_id", teamId)
-      .order("shirt_number", { ascending: true });
-
-    if (error) {
-      setAssignError(error.message);
-      return;
-    }
-
-    const loadedPlayers = (data ?? []) as Player[];
-    setTeamPlayers(loadedPlayers);
-    setSelectedPlayerIds(loadedPlayers.map((player) => player.id));
+    setAssignmentSuccess(null);
   }
 
   function togglePlayer(playerId: string) {
@@ -452,67 +800,98 @@ export default function HomePage() {
   }
 
   function toggleAllPlayers() {
-    if (selectedPlayerIds.length === teamPlayers.length) {
-      setSelectedPlayerIds([]);
-      return;
-    }
-
-    setSelectedPlayerIds(teamPlayers.map((player) => player.id));
+    setSelectedPlayerIds((current) =>
+      current.length === teamPlayers.length
+        ? []
+        : teamPlayers.map((player) => player.id)
+    );
   }
 
   async function createAssignments() {
-    if (!userId || !assignmentPlan) {
-      setAssignError("Bitte wähle zuerst ein Home-Workout aus.");
+    if (
+      !userId ||
+      !assignmentPlan ||
+      assignLoading ||
+      playersLoading ||
+      teamsLoading
+    ) {
       return;
     }
 
-    if (!assignmentTeamId) {
-      setAssignError("Bitte wähle ein Team aus.");
+    setAssignError(null);
+    setAssignmentSuccess(null);
+
+    if (!teams.some((team) => team.id === assignmentTeamId)) {
+      setAssignError("Bitte wähle eines deiner Teams aus.");
       return;
     }
 
-    if (selectedPlayerIds.length === 0) {
-      setAssignError("Bitte wähle mindestens einen Spieler aus.");
+    const validPlayerIds = selectedPlayerIds.filter((id) =>
+      teamPlayers.some(
+        (player) =>
+          player.id === id &&
+          player.team_id === assignmentTeamId
+      )
+    );
+
+    if (
+      validPlayerIds.length === 0 ||
+      validPlayerIds.length !== selectedPlayerIds.length
+    ) {
+      setAssignError(
+        "Bitte wähle mindestens einen Spieler aus dem aktuellen Team."
+      );
+      return;
+    }
+
+    if (dueDate && dueDate < todayLocal()) {
+      setAssignError(
+        "Das Fälligkeitsdatum darf nicht in der Vergangenheit liegen."
+      );
       return;
     }
 
     setAssignLoading(true);
-    setAssignError(null);
-    setAssignmentSuccess(null);
 
-    const assignmentRows = selectedPlayerIds.map((playerId) => ({
-      coach_id: userId,
-      team_id: assignmentTeamId,
-      player_id: playerId,
-      training_plan_id: assignmentPlan.id,
-      due_date: dueDate || null,
-    }));
+    try {
+      const rows = validPlayerIds.map((playerId) => ({
+        coach_id: userId,
+        team_id: assignmentTeamId,
+        player_id: playerId,
+        training_plan_id: assignmentPlan.id,
+        due_date: dueDate || null,
+      }));
 
-    const { error } = await supabase
-      .from("workout_assignments")
-      .upsert(assignmentRows, {
-        onConflict: "training_plan_id,player_id",
-        ignoreDuplicates: true,
-      });
+      const { data, error } = await supabase
+        .from("workout_assignments")
+        .upsert(rows, {
+          onConflict: "training_plan_id,player_id",
+          ignoreDuplicates: true,
+        })
+        .select("id");
 
-    if (error) {
-      setAssignError(error.message);
+      if (error) throw error;
+
+      const inserted = data?.length ?? 0;
+      const skipped = validPlayerIds.length - inserted;
+
+      setAssignmentSuccess(
+        inserted === 0
+          ? "Diese Spieler haben diesen Plan bereits zugewiesen bekommen. Bestehende Aufgaben und Bewertungen wurden nicht verändert."
+          : `${inserted} neue ${
+              inserted === 1 ? "Aufgabe wurde" : "Aufgaben wurden"
+            } erstellt.${
+              skipped > 0
+                ? ` ${skipped} bereits vorhandene Zuweisungen wurden übersprungen.`
+                : ""
+            }`
+      );
+    } catch (error) {
+      setAssignError(getErrorMessage(error));
+    } finally {
       setAssignLoading(false);
-      return;
     }
-
-    setAssignmentSuccess(
-      `Workout wurde ${selectedPlayerIds.length} Spieler${
-        selectedPlayerIds.length === 1 ? "" : "n"
-      } zugewiesen.`
-    );
-    setAssignLoading(false);
   }
-
-  const currentPlan = isSessionTab ? sessionPlan : homeWorkout;
-  const currentLoading = isSessionTab ? sessionLoading : homeLoading;
-  const currentError = isSessionTab ? sessionError : homeError;
-  const hasCurrentPlan = Boolean(currentPlan);
 
   if (authLoading) {
     return (
@@ -525,6 +904,26 @@ export default function HomePage() {
     );
   }
 
+  if (!userId) {
+    return (
+      <main className="auth-shell">
+        <section className="auth-card">
+          <h1>Anmeldung erforderlich</h1>
+
+          {authError && (
+            <div className="error-box" role="alert">
+              {authError}
+            </div>
+          )}
+
+          <a href="/login" className="secondary-button">
+            Zum Login
+          </a>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar no-print">
@@ -532,15 +931,28 @@ export default function HomePage() {
           <div className="brand-mark" aria-hidden="true">
             ⚽
           </div>
+
           <div>
             <span className="brand-name">MATCHPLAN AI</span>
-            <span className="brand-caption">Coach Workspace</span>
+            <span className="brand-caption">
+              Coach Workspace
+            </span>
           </div>
         </div>
 
-        <div className="topbar-actions">
+        <div
+          className="topbar-actions"
+          style={{ flexWrap: "wrap" }}
+        >
           <a className="status-pill link-pill" href="/teams">
             Teams
+          </a>
+
+          <a
+            className="status-pill link-pill"
+            href="/aufgaben-uebersicht"
+          >
+            Aufgaben & Feedback
           </a>
 
           {userEmail && (
@@ -552,78 +964,86 @@ export default function HomePage() {
           <button
             type="button"
             className="status-pill logout-button"
-            onClick={signOut}
+            onClick={() => void signOut()}
+            disabled={signingOut}
           >
             <span className="status-dot" aria-hidden="true" />
-            Ausloggen
+            {signingOut ? "Meldet ab …" : "Ausloggen"}
           </button>
         </div>
       </header>
 
+      {authError && (
+        <div className="error-box no-print" role="alert">
+          {authError}
+        </div>
+      )}
+
       <section className="hero no-print">
-        <p className="eyebrow">Fußballtraining · Einfach geplant</p>
+        <p className="eyebrow">
+          Fußballtraining · Einfach geplant
+        </p>
+
         <h1>
           Bessere Einheiten.
           <br />
           <span>Weniger Planung.</span>
         </h1>
+
         <p>
-          Erstelle strukturierte Teamtrainings und individuelle Home-Workouts
-          für deine Spieler – in wenigen Sekunden.
+          Erstelle Trainingspläne, weise deinen Spielern Workouts
+          zu und behalte ihre Rückmeldungen im Blick.
         </p>
       </section>
 
-      <nav className="tab-list no-print" aria-label="Bereich auswählen">
-        <button
-          type="button"
-          className={`tab ${tab === "session" ? "active" : ""}`}
-          onClick={() => setTab("session")}
-        >
-          <span className="tab-icon" aria-hidden="true">
-            ⚽
-          </span>
-          <span>
-            <span className="tab-title">Teamtraining</span>
-            <span className="tab-description">
-              Strukturierte Einheit für die Mannschaft
+      <nav
+        className="tab-list no-print"
+        aria-label="Bereich auswählen"
+      >
+        {[
+          {
+            key: "session" as const,
+            icon: "⚽",
+            title: "Teamtraining",
+            description: "Einheiten für deine Mannschaft",
+          },
+          {
+            key: "home" as const,
+            icon: "⌂",
+            title: "Home-Workout",
+            description: "Individuelle Aufgaben für zuhause",
+          },
+          {
+            key: "saved" as const,
+            icon: "▣",
+            title: "Meine Pläne",
+            description: "Speichern, öffnen und zuweisen",
+          },
+        ].map((item) => (
+          <button
+            key={item.key}
+            type="button"
+            className={`tab ${
+              tab === item.key ? "active" : ""
+            }`}
+            aria-pressed={tab === item.key}
+            onClick={() => setTab(item.key)}
+          >
+            <span className="tab-icon" aria-hidden="true">
+              {item.icon}
             </span>
-          </span>
-        </button>
 
-        <button
-          type="button"
-          className={`tab ${tab === "home" ? "active" : ""}`}
-          onClick={() => setTab("home")}
-        >
-          <span className="tab-icon" aria-hidden="true">
-            ⌂
-          </span>
-          <span>
-            <span className="tab-title">Home-Workout</span>
-            <span className="tab-description">
-              Individuelle Aufgabe für zuhause
+            <span>
+              <span className="tab-title">{item.title}</span>
+              <span className="tab-description">
+                {item.description}
+              </span>
             </span>
-          </span>
-        </button>
-
-        <button
-          type="button"
-          className={`tab ${tab === "saved" ? "active" : ""}`}
-          onClick={() => setTab("saved")}
-        >
-          <span className="tab-icon" aria-hidden="true">
-            ▣
-          </span>
-          <span>
-            <span className="tab-title">Meine Pläne</span>
-            <span className="tab-description">
-              Speichern, öffnen und zuweisen
-            </span>
-          </span>
-        </button>
+          </button>
+        ))}
       </nav>
 
-      {isSavedTab ? (
+      {tab === "saved" ? (
         <section className="saved-page">
           <div className="saved-page-header">
             <div>
@@ -637,52 +1057,70 @@ export default function HomePage() {
               onClick={() => void loadSavedPlans()}
               disabled={savedPlansLoading}
             >
-              {savedPlansLoading ? "Lädt ..." : "↻ Aktualisieren"}
+              {savedPlansLoading
+                ? "Lädt …"
+                : "↻ Aktualisieren"}
             </button>
+          </div>
+
+          <div
+            className="assignment-info"
+            style={{ marginBottom: 20 }}
+          >
+            Erledigte Aufgaben, Belastungsbewertungen und
+            Kommentare findest du unter{" "}
+            <a href="/aufgaben-uebersicht">
+              Aufgaben & Feedback
+            </a>
+            .
           </div>
 
           {savedPlansError && (
             <div className="error-box saved-error" role="alert">
-              <strong>Pläne konnten nicht geladen werden:</strong>
-              <br />
               {savedPlansError}
             </div>
           )}
 
-          {savedPlansLoading && (
+          {savedPlansLoading ? (
             <div className="saved-empty">
-              <span className="button-spinner" aria-hidden="true" />
+              <span
+                className="button-spinner"
+                aria-hidden="true"
+              />
               <p>Deine Pläne werden geladen …</p>
             </div>
-          )}
-
-          {!savedPlansLoading &&
-            !savedPlansError &&
-            savedPlans.length === 0 && (
+          ) : savedPlans.length === 0 ? (
+            !savedPlansError && (
               <div className="saved-empty">
                 <div>
-                  <div className="empty-icon" aria-hidden="true">
+                  <div
+                    className="empty-icon"
+                    aria-hidden="true"
+                  >
                     ▣
                   </div>
                   <h3>Noch keine gespeicherten Pläne</h3>
                   <p>
-                    Generiere einen Trainingsplan oder ein Home-Workout und
-                    speichere ihn anschließend hier.
+                    Erstelle ein Training oder Home-Workout und
+                    speichere es anschließend.
                   </p>
                 </div>
               </div>
-            )}
-
-          {!savedPlansLoading && savedPlans.length > 0 && (
+            )
+          ) : (
             <div className="saved-plan-grid">
               {savedPlans.map((plan) => (
-                <article className="saved-plan-card" key={plan.id}>
+                <article
+                  className="saved-plan-card"
+                  key={plan.id}
+                >
                   <div className="saved-card-top">
                     <span className="saved-type">
                       {plan.plan_type === "team"
                         ? "TEAMTRAINING"
                         : "HOME-WORKOUT"}
                     </span>
+
                     <span className="saved-date">
                       {formatDate(plan.created_at)}
                     </span>
@@ -695,7 +1133,10 @@ export default function HomePage() {
                     <span>⏱ {plan.duration_min} Min</span>
                   </div>
 
-                  <div className="saved-card-actions">
+                  <div
+                    className="saved-card-actions"
+                    style={{ flexWrap: "wrap" }}
+                  >
                     <button
                       type="button"
                       className="secondary-button"
@@ -708,7 +1149,7 @@ export default function HomePage() {
                       <button
                         type="button"
                         className="assign-button"
-                        onClick={() => void openAssignDialog(plan)}
+                        onClick={() => openAssignDialog(plan)}
                       >
                         Zuweisen
                       </button>
@@ -717,10 +1158,14 @@ export default function HomePage() {
                     <button
                       type="button"
                       className="danger-button"
-                      onClick={() => void deleteSavedPlan(plan.id)}
-                      disabled={deleteLoadingId === plan.id}
+                      onClick={() =>
+                        void deleteSavedPlan(plan)
+                      }
+                      disabled={deleteLoadingId !== null}
                     >
-                      {deleteLoadingId === plan.id ? "Löscht ..." : "Löschen"}
+                      {deleteLoadingId === plan.id
+                        ? "Löscht …"
+                        : "Löschen"}
                     </button>
                   </div>
                 </article>
@@ -733,7 +1178,10 @@ export default function HomePage() {
           <section className="panel no-print">
             <div className="panel-header">
               <div>
-                <p className="panel-kicker">Plan konfigurieren</p>
+                <p className="panel-kicker">
+                  Plan konfigurieren
+                </p>
+
                 <h2>
                   {isSessionTab
                     ? "Teamtraining erstellen"
@@ -746,232 +1194,242 @@ export default function HomePage() {
               </span>
             </div>
 
-            {isSessionTab ? (
-              <div className="form-content">
+            <form
+              className="form-content"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void generatePlan(
+                  isSessionTab ? "team" : "home"
+                );
+              }}
+            >
+              <fieldset
+                disabled={currentLoading}
+                style={{
+                  margin: 0,
+                  padding: 0,
+                  border: 0,
+                  minWidth: 0,
+                }}
+              >
                 <div className="field-grid">
-                  <div className="field">
-                    <label htmlFor="session-duration">Dauer</label>
-                    <select
-                      id="session-duration"
-                      value={sessionDuration}
-                      onChange={(event) =>
-                        setSessionDuration(Number(event.target.value))
-                      }
-                    >
-                      <option value={60}>60 Minuten</option>
-                      <option value={75}>75 Minuten</option>
-                      <option value={90}>90 Minuten</option>
-                      <option value={105}>105 Minuten</option>
-                      <option value={120}>120 Minuten</option>
-                    </select>
-                  </div>
+                  {isSessionTab ? (
+                    <>
+                      <SelectField
+                        id="session-duration"
+                        label="Dauer"
+                        value={sessionDuration}
+                        onChange={(value) =>
+                          setSessionDuration(Number(value))
+                        }
+                        options={[60, 75, 90, 105, 120].map(
+                          (value) => ({
+                            value,
+                            label: `${value} Minuten`,
+                          })
+                        )}
+                      />
 
-                  <div className="field">
-                    <label htmlFor="session-frequency">
-                      Training pro Woche
-                    </label>
-                    <select
-                      id="session-frequency"
-                      value={sessionFrequency}
-                      onChange={(event) =>
-                        setSessionFrequency(Number(event.target.value))
-                      }
-                    >
-                      <option value={1}>1× pro Woche</option>
-                      <option value={2}>2× pro Woche</option>
-                    </select>
-                  </div>
+                      <SelectField
+                        id="session-frequency"
+                        label="Training pro Woche"
+                        value={sessionFrequency}
+                        onChange={(value) =>
+                          setSessionFrequency(Number(value))
+                        }
+                        options={[1, 2].map((value) => ({
+                          value,
+                          label: `${value}× pro Woche`,
+                        }))}
+                      />
 
-                  <div className="field">
-                    <label htmlFor="session-focus">Fokus</label>
-                    <select
-                      id="session-focus"
-                      value={sessionFocus}
-                      onChange={(event) =>
-                        setSessionFocus(event.target.value)
-                      }
-                    >
-                      <option>Angriff</option>
-                      <option>Verteidigung</option>
-                      <option>Pressing</option>
-                      <option>Ballbesitz</option>
-                      <option>Umschaltspiel</option>
-                      <option>Standards</option>
-                      <option>Athletik</option>
-                    </select>
-                  </div>
+                      <SelectField
+                        id="session-focus"
+                        label="Fokus"
+                        value={sessionFocus}
+                        onChange={setSessionFocus}
+                        options={[
+                          "Angriff",
+                          "Verteidigung",
+                          "Pressing",
+                          "Ballbesitz",
+                          "Umschaltspiel",
+                          "Standards",
+                          "Athletik",
+                        ].map((value) => ({
+                          value,
+                          label: value,
+                        }))}
+                      />
 
-                  <div className="field">
-                    <label htmlFor="session-level">
-                      Altersgruppe / Level
-                    </label>
-                    <select
-                      id="session-level"
-                      value={sessionLevel}
-                      onChange={(event) =>
-                        setSessionLevel(event.target.value)
-                      }
-                    >
-                      <option>U11</option>
-                      <option>U13</option>
-                      <option>U15+</option>
-                      <option>U17+</option>
-                      <option>Senioren</option>
-                    </select>
-                  </div>
+                      <SelectField
+                        id="session-level"
+                        label="Altersgruppe / Level"
+                        value={sessionLevel}
+                        onChange={setSessionLevel}
+                        options={[
+                          "U11",
+                          "U13",
+                          "U15+",
+                          "U17+",
+                          "Senioren",
+                        ].map((value) => ({
+                          value,
+                          label: value,
+                        }))}
+                      />
 
-                  <div className="field">
-                    <label htmlFor="session-location">Trainingsort</label>
-                    <select
-                      id="session-location"
-                      value={sessionLocation}
-                      onChange={(event) =>
-                        setSessionLocation(event.target.value)
-                      }
-                    >
-                      <option>Platz</option>
-                      <option>Halle</option>
-                      <option>Kleinfeld</option>
-                    </select>
-                  </div>
+                      <SelectField
+                        id="session-location"
+                        label="Trainingsort"
+                        value={sessionLocation}
+                        onChange={setSessionLocation}
+                        options={[
+                          "Platz",
+                          "Halle",
+                          "Kleinfeld",
+                        ].map((value) => ({
+                          value,
+                          label: value,
+                        }))}
+                      />
 
-                  <div className="field">
-                    <label htmlFor="session-equipment">Equipment</label>
-                    <input
-                      id="session-equipment"
-                      value={sessionEquipment}
-                      onChange={(event) =>
-                        setSessionEquipment(event.target.value)
-                      }
-                      placeholder="Hütchen, Leibchen, Tore"
-                    />
-                  </div>
+                      <div className="field">
+                        <label htmlFor="session-equipment">
+                          Equipment
+                        </label>
+
+                        <input
+                          id="session-equipment"
+                          value={sessionEquipment}
+                          onChange={(event) =>
+                            setSessionEquipment(
+                              event.target.value
+                            )
+                          }
+                          placeholder="Hütchen, Leibchen, Tore"
+                          maxLength={500}
+                        />
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <SelectField
+                        id="home-duration"
+                        label="Dauer"
+                        value={homeDuration}
+                        onChange={(value) =>
+                          setHomeDuration(Number(value))
+                        }
+                        options={[10, 15, 20, 25, 30].map(
+                          (value) => ({
+                            value,
+                            label: `${value} Minuten`,
+                          })
+                        )}
+                      />
+
+                      <SelectField
+                        id="home-focus"
+                        label="Fokus"
+                        value={homeFocus}
+                        onChange={setHomeFocus}
+                        options={[
+                          "Angriff",
+                          "Ballkontrolle",
+                          "Dribbling",
+                          "Passspiel",
+                          "Koordination",
+                          "Athletik",
+                          "Stabilität",
+                        ].map((value) => ({
+                          value,
+                          label: value,
+                        }))}
+                      />
+
+                      <SelectField
+                        id="home-level"
+                        label="Level"
+                        value={homeLevel}
+                        onChange={setHomeLevel}
+                        options={[
+                          "Beginner",
+                          "Intermediate",
+                          "Advanced",
+                        ].map((value) => ({
+                          value,
+                          label: value,
+                        }))}
+                      />
+
+                      <SelectField
+                        id="home-location"
+                        label="Trainingsort"
+                        value={homeLocation}
+                        onChange={setHomeLocation}
+                        options={[
+                          "Zuhause",
+                          "Garten",
+                          "Platz",
+                          "Halle",
+                        ].map((value) => ({
+                          value,
+                          label: value,
+                        }))}
+                      />
+
+                      <div className="field full">
+                        <label htmlFor="home-equipment">
+                          Verfügbares Equipment
+                        </label>
+
+                        <input
+                          id="home-equipment"
+                          value={homeEquipment}
+                          onChange={(event) =>
+                            setHomeEquipment(
+                              event.target.value
+                            )
+                          }
+                          placeholder="z. B. Ball und Hütchen"
+                          maxLength={500}
+                        />
+                      </div>
+                    </>
+                  )}
                 </div>
 
                 <p className="helper">
-                  Die KI erstellt Warm-up, Schwerpunkt, Spielformen,
-                  Abschlussspiel und Cooldown passend zu deinem Thema.
+                  {isSessionTab
+                    ? "Erstelle eine strukturierte Einheit mit Übungen, Organisation und Coaching-Punkten."
+                    : "Erstelle ein individuelles Workout für das Training zwischen den Mannschaftseinheiten."}
                 </p>
 
                 <button
-                  type="button"
+                  type="submit"
                   className="generate-button"
-                  onClick={generateSessionPlan}
-                  disabled={sessionLoading}
+                  disabled={currentLoading}
                 >
-                  {sessionLoading && (
-                    <span className="button-spinner" aria-hidden="true" />
-                  )}
-                  {sessionLoading
-                    ? "Plan wird erstellt ..."
-                    : "✦ Trainingsplan generieren"}
-                </button>
-              </div>
-            ) : (
-              <div className="form-content">
-                <div className="field-grid">
-                  <div className="field">
-                    <label htmlFor="home-duration">Dauer</label>
-                    <select
-                      id="home-duration"
-                      value={homeDuration}
-                      onChange={(event) =>
-                        setHomeDuration(Number(event.target.value))
-                      }
-                    >
-                      <option value={10}>10 Minuten</option>
-                      <option value={15}>15 Minuten</option>
-                      <option value={20}>20 Minuten</option>
-                      <option value={25}>25 Minuten</option>
-                      <option value={30}>30 Minuten</option>
-                    </select>
-                  </div>
-
-                  <div className="field">
-                    <label htmlFor="home-focus">Fokus</label>
-                    <select
-                      id="home-focus"
-                      value={homeFocus}
-                      onChange={(event) => setHomeFocus(event.target.value)}
-                    >
-                      <option>Angriff</option>
-                      <option>Ballkontrolle</option>
-                      <option>Dribbling</option>
-                      <option>Passspiel</option>
-                      <option>Koordination</option>
-                      <option>Athletik</option>
-                      <option>Stabilität</option>
-                    </select>
-                  </div>
-
-                  <div className="field">
-                    <label htmlFor="home-level">Level</label>
-                    <select
-                      id="home-level"
-                      value={homeLevel}
-                      onChange={(event) => setHomeLevel(event.target.value)}
-                    >
-                      <option>Beginner</option>
-                      <option>Intermediate</option>
-                      <option>Advanced</option>
-                    </select>
-                  </div>
-
-                  <div className="field">
-                    <label htmlFor="home-location">Ort</label>
-                    <select
-                      id="home-location"
-                      value={homeLocation}
-                      onChange={(event) =>
-                        setHomeLocation(event.target.value)
-                      }
-                    >
-                      <option>Zuhause</option>
-                      <option>Garten</option>
-                      <option>Platz</option>
-                      <option>Halle</option>
-                    </select>
-                  </div>
-
-                  <div className="field full">
-                    <label htmlFor="home-equipment">
-                      Verfügbares Equipment
-                    </label>
-                    <input
-                      id="home-equipment"
-                      value={homeEquipment}
-                      onChange={(event) =>
-                        setHomeEquipment(event.target.value)
-                      }
-                      placeholder="z. B. Nur Ball, Ball und Hütchen"
+                  {currentLoading && (
+                    <span
+                      className="button-spinner"
+                      aria-hidden="true"
                     />
-                  </div>
-                </div>
-
-                <p className="helper">
-                  Ideal als kleine Trainingsaufgabe zwischen zwei Teamtrainings.
-                  Warm-up, Hauptteil und Finisher sind bereits eingeplant.
-                </p>
-
-                <button
-                  type="button"
-                  className="generate-button"
-                  onClick={generateHomeWorkout}
-                  disabled={homeLoading}
-                >
-                  {homeLoading && (
-                    <span className="button-spinner" aria-hidden="true" />
                   )}
-                  {homeLoading
-                    ? "Workout wird erstellt ..."
-                    : "✦ Home-Workout generieren"}
+
+                  {currentLoading
+                    ? "Plan wird erstellt …"
+                    : isSessionTab
+                      ? "✦ Trainingsplan generieren"
+                      : "✦ Home-Workout generieren"}
                 </button>
-              </div>
-            )}
+              </fieldset>
+            </form>
 
             {currentError && (
               <div className="error-box" role="alert">
-                <strong>Das hat noch nicht geklappt:</strong>
+                Das hat noch nicht geklappt:
                 <br />
                 {currentError}
               </div>
@@ -982,16 +1440,19 @@ export default function HomePage() {
             <div className="panel-header no-print">
               <div>
                 <p className="panel-kicker">Dein Ergebnis</p>
-                <h2>{isSessionTab ? "Trainingsplan" : "Home-Workout"}</h2>
+                <h2>
+                  {isSessionTab
+                    ? "Trainingsplan"
+                    : "Home-Workout"}
+                </h2>
               </div>
 
-              {hasCurrentPlan && (
+              {currentPlan && !currentLoading && (
                 <div className="result-actions">
                   <button
                     type="button"
                     className="icon-button"
                     onClick={openSaveDialog}
-                    title="Plan speichern"
                   >
                     ♡ <span>Speichern</span>
                   </button>
@@ -999,8 +1460,8 @@ export default function HomePage() {
                   <button
                     type="button"
                     className="icon-button"
-                    onClick={printPlan}
-                    title="Plan drucken oder als PDF speichern"
+                    onClick={() => window.print()}
+                    title="Drucken oder als PDF speichern"
                   >
                     ⎙ <span>Drucken</span>
                   </button>
@@ -1008,95 +1469,95 @@ export default function HomePage() {
               )}
             </div>
 
-            {!hasCurrentPlan && !currentLoading && (
+            {currentLoading ? (
               <div className="empty-state">
                 <div>
-                  <div className="empty-icon" aria-hidden="true">
+                  <div className="empty-icon">
+                    <span
+                      className="button-spinner"
+                      aria-hidden="true"
+                    />
+                  </div>
+                  <h3>Dein Plan entsteht</h3>
+                  <p>
+                    Übungen und Trainingsablauf werden
+                    zusammengestellt.
+                  </p>
+                </div>
+              </div>
+            ) : currentPlan ? (
+              <PlanView
+                plan={currentPlan}
+                focus={
+                  isSessionTab
+                    ? sessionPlanFocus
+                    : homePlanFocus
+                }
+              />
+            ) : (
+              <div className="empty-state">
+                <div>
+                  <div
+                    className="empty-icon"
+                    aria-hidden="true"
+                  >
                     ✦
                   </div>
                   <h3>Bereit für deinen Plan</h3>
                   <p>
-                    Wähle links die Parameter und lass dir einen strukturierten
-                    Trainingsplan erstellen.
+                    Wähle deine Parameter und erstelle einen
+                    Trainingsplan.
                   </p>
                 </div>
               </div>
-            )}
-
-            {currentLoading && (
-              <div className="empty-state">
-                <div>
-                  <div className="empty-icon">
-                    <span className="button-spinner" aria-hidden="true" />
-                  </div>
-                  <h3>Dein Plan entsteht</h3>
-                  <p>
-                    Die KI sortiert Übungen, Dauer und Coaching-Punkte für deine
-                    Einheit.
-                  </p>
-                </div>
-              </div>
-            )}
-
-            {isSessionTab && sessionPlan && !currentLoading && (
-              <PlanView
-                plan={sessionPlan}
-                focus={sessionFocus}
-                planType="team"
-              />
-            )}
-
-            {!isSessionTab && homeWorkout && !currentLoading && (
-              <PlanView
-                plan={homeWorkout}
-                focus={homeFocus}
-                planType="home"
-              />
             )}
           </section>
         </section>
       )}
 
-      {saveDialogOpen && (
-        <div
-          className="modal-backdrop no-print"
-          role="presentation"
-          onMouseDown={() => {
-            if (!saveLoading) setSaveDialogOpen(false);
-          }}
+      {saveDraft && (
+        <Modal
+          titleId="save-dialog-title"
+          busy={saveLoading}
+          onClose={() => setSaveDraft(null)}
         >
-          <section
-            className="save-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="save-dialog-title"
-            onMouseDown={(event) => event.stopPropagation()}
-          >
-            <p className="panel-kicker">Plan speichern</p>
-            <h2 id="save-dialog-title">Gib deinem Plan einen Namen</h2>
-            <p>
-              Du kannst ihn später unter „Meine Pläne“ öffnen, drucken oder
-              erneut verwenden.
-            </p>
+          <p className="panel-kicker">Plan speichern</p>
+          <h2 id="save-dialog-title">
+            Gib deinem Plan einen Namen
+          </h2>
 
+          <p>
+            Gespeicherte Home-Workouts kannst du anschließend
+            deinen Spielern zuweisen.
+          </p>
+
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveCurrentPlan();
+            }}
+          >
             <div className="field">
               <label htmlFor="save-plan-title">Planname</label>
+
               <input
                 id="save-plan-title"
                 value={saveTitle}
+                onChange={(event) =>
+                  setSaveTitle(event.target.value)
+                }
                 maxLength={120}
+                disabled={saveLoading}
                 autoFocus
-                onChange={(event) => setSaveTitle(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    void saveCurrentPlan();
-                  }
-                }}
+                required
               />
             </div>
 
             {saveError && (
-              <div className="error-box modal-error" role="alert">
+              <div
+                className="error-box modal-error"
+                role="alert"
+              >
                 {saveError}
               </div>
             )}
@@ -1105,199 +1566,250 @@ export default function HomePage() {
               <button
                 type="button"
                 className="secondary-button"
-                onClick={() => setSaveDialogOpen(false)}
+                onClick={() => setSaveDraft(null)}
                 disabled={saveLoading}
               >
                 Abbrechen
               </button>
 
               <button
-                type="button"
+                type="submit"
                 className="generate-button modal-save-button"
-                onClick={() => void saveCurrentPlan()}
-                disabled={saveLoading}
+                disabled={saveLoading || !saveTitle.trim()}
               >
-                {saveLoading && (
-                  <span className="button-spinner" aria-hidden="true" />
-                )}
-                {saveLoading ? "Speichert ..." : "Plan speichern"}
+                {saveLoading
+                  ? "Speichert …"
+                  : "Plan speichern"}
               </button>
             </div>
-          </section>
-        </div>
+          </form>
+        </Modal>
       )}
 
-      {assignDialogOpen && (
-        <div
-          className="modal-backdrop no-print"
-          role="presentation"
-          onMouseDown={() => {
-            if (!assignLoading) setAssignDialogOpen(false);
-          }}
+      {assignmentPlan && (
+        <Modal
+          titleId="assign-dialog-title"
+          busy={assignLoading}
+          onClose={closeAssignDialog}
+          extraClass="assignment-modal"
         >
-          <section
-            className="save-modal assignment-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="assign-dialog-title"
-            onMouseDown={(event) => event.stopPropagation()}
-          >
-            <p className="panel-kicker">Home-Workout zuweisen</p>
-            <h2 id="assign-dialog-title">
-              {assignmentPlan?.title || "Workout auswählen"}
-            </h2>
-            <p>
-              Wähle ein Team und die Spieler, die dieses Workout erhalten
-              sollen.
-            </p>
+          <p className="panel-kicker">
+            Home-Workout zuweisen
+          </p>
 
-            <div className="field">
-              <label htmlFor="assignment-team">Team</label>
-              <select
-                id="assignment-team"
-                value={assignmentTeamId}
-                onChange={(event) => setAssignmentTeamId(event.target.value)}
-              >
-                <option value="">Team auswählen …</option>
-                {teams.map((team) => (
-                  <option key={team.id} value={team.id}>
-                    {team.name}
-                    {team.age_group ? ` (${team.age_group})` : ""}
-                  </option>
-                ))}
-              </select>
-            </div>
+          <h2 id="assign-dialog-title">
+            {assignmentPlan.title}
+          </h2>
 
-            {teams.length === 0 && (
+          <p>
+            Wähle ein Team, die Spieler und optional eine Frist.
+            Bereits vorhandene Zuweisungen werden nicht
+            überschrieben.
+          </p>
+
+          <SelectField
+            id="assignment-team"
+            label="Team"
+            value={assignmentTeamId}
+            onChange={changeAssignmentTeam}
+            disabled={
+              teamsLoading ||
+              assignLoading ||
+              Boolean(assignmentSuccess)
+            }
+            options={[
+              {
+                value: "",
+                label: teamsLoading
+                  ? "Teams werden geladen …"
+                  : "Team auswählen …",
+              },
+              ...teams.map((team) => ({
+                value: team.id,
+                label: `${team.name}${
+                  team.age_group
+                    ? ` (${team.age_group})`
+                    : ""
+                }`,
+              })),
+            ]}
+          />
+
+          {!teamsLoading &&
+            teams.length === 0 &&
+            !assignError && (
               <div className="assignment-info">
-                Du hast noch kein Team angelegt. Gehe zuerst zu „Teams“ und
-                erstelle eine Mannschaft mit Spielern.
+                Noch kein Team vorhanden. Erstelle zuerst unter{" "}
+                <a href="/teams">Teams</a> eine Mannschaft.
               </div>
             )}
 
-            {assignmentTeamId && (
-              <>
-                <div className="field assignment-due-date">
-                  <label htmlFor="assignment-due-date">
-                    Fälligkeitsdatum (optional)
-                  </label>
-                  <input
-                    id="assignment-due-date"
-                    type="date"
-                    min={getTodayDate()}
-                    value={dueDate}
-                    onChange={(event) => setDueDate(event.target.value)}
-                  />
-                </div>
+          {assignmentTeamId && (
+            <>
+              <div className="field assignment-due-date">
+                <label htmlFor="assignment-due-date">
+                  Fälligkeitsdatum – optional
+                </label>
 
-                <div className="assignment-player-header">
-                  <div>
-                    <p className="form-section-title">Spieler auswählen</p>
-                    <span>
-                      {selectedPlayerIds.length} von {teamPlayers.length}{" "}
-                      ausgewählt
-                    </span>
-                  </div>
-
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    onClick={toggleAllPlayers}
-                    disabled={teamPlayers.length === 0}
-                  >
-                    {selectedPlayerIds.length === teamPlayers.length
-                      ? "Alle abwählen"
-                      : "Alle auswählen"}
-                  </button>
-                </div>
-
-                {teamPlayers.length === 0 ? (
-                  <div className="assignment-info">
-                    Dieses Team hat noch keine Spieler. Ergänze sie unter
-                    „Teams“.
-                  </div>
-                ) : (
-                  <div className="assignment-player-list">
-                    {teamPlayers.map((player) => {
-                      const selected = selectedPlayerIds.includes(player.id);
-
-                      return (
-                        <label
-                          className={`assignment-player ${
-                            selected ? "selected" : ""
-                          }`}
-                          key={player.id}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={selected}
-                            onChange={() => togglePlayer(player.id)}
-                          />
-
-                          <span className="assignment-player-number">
-                            {player.shirt_number ?? "–"}
-                          </span>
-
-                          <span className="assignment-player-name">
-                            <strong>{player.full_name}</strong>
-                            <small>
-                              {player.position || "Position offen"}
-                            </small>
-                          </span>
-
-                          <span className="assignment-check">✓</span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                )}
-              </>
-            )}
-
-            {assignError && (
-              <div className="error-box modal-error" role="alert">
-                {assignError}
-              </div>
-            )}
-
-            {assignmentSuccess && (
-              <div className="success-box assignment-success" role="status">
-                {assignmentSuccess}
-              </div>
-            )}
-
-            <div className="modal-actions">
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() => setAssignDialogOpen(false)}
-                disabled={assignLoading}
-              >
-                {assignmentSuccess ? "Schließen" : "Abbrechen"}
-              </button>
-
-              {!assignmentSuccess && (
-                <button
-                  type="button"
-                  className="generate-button modal-save-button"
-                  onClick={() => void createAssignments()}
+                <input
+                  id="assignment-due-date"
+                  type="date"
+                  min={todayLocal()}
+                  value={dueDate}
+                  onChange={(event) =>
+                    setDueDate(event.target.value)
+                  }
                   disabled={
                     assignLoading ||
-                    !assignmentTeamId ||
-                    selectedPlayerIds.length === 0
+                    Boolean(assignmentSuccess)
+                  }
+                />
+              </div>
+
+              <div className="assignment-player-header">
+                <div>
+                  <p className="form-section-title">
+                    Spieler auswählen
+                  </p>
+                  <span>
+                    {selectedPlayerIds.length} von{" "}
+                    {teamPlayers.length} ausgewählt
+                  </span>
+                </div>
+
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={toggleAllPlayers}
+                  disabled={
+                    playersLoading ||
+                    assignLoading ||
+                    teamPlayers.length === 0 ||
+                    Boolean(assignmentSuccess)
                   }
                 >
-                  {assignLoading && (
-                    <span className="button-spinner" aria-hidden="true" />
-                  )}
-                  {assignLoading
-                    ? "Weist zu ..."
-                    : `${selectedPlayerIds.length || 0} Spieler zuweisen`}
+                  {teamPlayers.length > 0 &&
+                  selectedPlayerIds.length ===
+                    teamPlayers.length
+                    ? "Alle abwählen"
+                    : "Alle auswählen"}
                 </button>
+              </div>
+
+              {playersLoading ? (
+                <p className="helper">
+                  Spieler werden geladen …
+                </p>
+              ) : teamPlayers.length === 0 ? (
+                <div className="assignment-info">
+                  Keine Spieler geladen. Prüfe den Kader unter
+                  „Teams“ oder eine angezeigte Fehlermeldung.
+                </div>
+              ) : (
+                <div className="assignment-player-list">
+                  {teamPlayers.map((player) => {
+                    const selected =
+                      selectedPlayerIds.includes(player.id);
+
+                    return (
+                      <label
+                        key={player.id}
+                        className={`assignment-player ${
+                          selected ? "selected" : ""
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={() =>
+                            togglePlayer(player.id)
+                          }
+                          disabled={
+                            assignLoading ||
+                            Boolean(assignmentSuccess)
+                          }
+                        />
+
+                        <span className="assignment-player-number">
+                          {player.shirt_number ?? "–"}
+                        </span>
+
+                        <span className="assignment-player-name">
+                          <strong>{player.full_name}</strong>
+                          <small>
+                            {player.position || "Position offen"}
+                          </small>
+                        </span>
+
+                        <span
+                          className="assignment-check"
+                          aria-hidden="true"
+                        >
+                          ✓
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
               )}
+            </>
+          )}
+
+          {assignError && (
+            <div className="error-box modal-error" role="alert">
+              {assignError}
             </div>
-          </section>
-        </div>
+          )}
+
+          {assignmentSuccess && (
+            <div
+              className="success-box assignment-success"
+              role="status"
+            >
+              {assignmentSuccess}
+            </div>
+          )}
+
+          {assignmentSuccess && (
+            <p className="helper">
+              Status und Bewertungen findest du unter{" "}
+              <a href="/aufgaben-uebersicht">
+                Aufgaben & Feedback
+              </a>
+              .
+            </p>
+          )}
+
+          <div className="modal-actions">
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={closeAssignDialog}
+              disabled={assignLoading}
+            >
+              {assignmentSuccess ? "Schließen" : "Abbrechen"}
+            </button>
+
+            {!assignmentSuccess && (
+              <button
+                type="button"
+                className="generate-button modal-save-button"
+                onClick={() => void createAssignments()}
+                disabled={
+                  assignLoading ||
+                  teamsLoading ||
+                  playersLoading ||
+                  !assignmentTeamId ||
+                  selectedPlayerIds.length === 0
+                }
+              >
+                {assignLoading
+                  ? "Weist zu …"
+                  : `${selectedPlayerIds.length} Spieler zuweisen`}
+              </button>
+            )}
+          </div>
+        </Modal>
       )}
     </main>
   );
@@ -1306,140 +1818,143 @@ export default function HomePage() {
 function PlanView({
   plan,
   focus,
-  planType,
 }: {
   plan: SessionPlan | HomeWorkout;
   focus: string;
-  planType: "team" | "home";
 }) {
-  if (planType === "team" && isSessionPlan(plan)) {
-    return (
-      <div className="result-content">
-        <div className="result-heading">
-          <h3>{plan.title}</h3>
-          <div className="result-meta">
-            <span className="meta-chip">⏱ {plan.duration_min} Min</span>
+  const isTeam = isSessionPlan(plan);
+
+  return (
+    <div className="result-content">
+      <div className="result-heading">
+        <h3>{plan.title}</h3>
+
+        <div className="result-meta">
+          <span className="meta-chip">
+            ⏱ {plan.duration_min} Min
+          </span>
+
+          {isTeam && (
             <span className="meta-chip">
               ↻ {plan.frequency_per_week}× / Woche
             </span>
-            <span className="meta-chip">⚽ {focus}</span>
-          </div>
+          )}
+
+          <span className="meta-chip">
+            ⚽ {isTeam ? focus : plan.focus || focus}
+          </span>
         </div>
-
-        <div className="phase-list">
-          {plan.phases.map((phase, phaseIndex) => (
-            <article className="phase-card" key={`${phase.name}-${phaseIndex}`}>
-              <div className="phase-header">
-                <div className="phase-title">
-                  <span className="phase-index">{phaseIndex + 1}</span>
-                  {phase.name}
-                </div>
-                <span className="time-chip">{phase.duration_min} Min</span>
-              </div>
-
-              <div className="exercise-list">
-                {phase.exercises.map((exercise, exerciseIndex) => (
-                  <div
-                    className="exercise"
-                    key={`${exercise.name}-${exerciseIndex}`}
-                  >
-                    <div className="exercise-name">
-                      <span>{exercise.name}</span>
-                      <span className="exercise-time">
-                        {exercise.duration_min} Min
-                      </span>
-                    </div>
-
-                    <p>
-                      <strong>Ziel:</strong> {exercise.objective}
-                    </p>
-                    <p>
-                      <strong>Organisation:</strong> {exercise.organization}
-                    </p>
-                    <p>
-                      <strong>Coaching:</strong> {exercise.coaching_points}
-                    </p>
-                    <p>
-                      <strong>Material:</strong> {exercise.equipment}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            </article>
-          ))}
-        </div>
-
-        <p className="footer-note">
-          KI-Vorschlag: Passe Belastung, Gruppengröße und Übungen stets an deine
-          Mannschaft und die Tagesform an.
-        </p>
       </div>
-    );
-  }
 
-  if (planType === "home" && !isSessionPlan(plan)) {
-    return (
-      <div className="result-content">
-        <div className="result-heading">
-          <h3>{plan.title}</h3>
-          <div className="result-meta">
-            <span className="meta-chip">⏱ {plan.duration_min} Min</span>
-            <span className="meta-chip">⚽ {plan.focus || focus}</span>
-          </div>
-        </div>
-
-        <div className="phase-list">
-          {plan.blocks.map((block, blockIndex) => (
-            <article className="phase-card" key={`${block.name}-${blockIndex}`}>
-              <div className="phase-header">
-                <div className="phase-title">
-                  <span className="phase-index">{blockIndex + 1}</span>
-                  {block.name}
-                </div>
-                <span className="time-chip">{block.duration_min} Min</span>
-              </div>
-
-              <div className="exercise-list">
-                {block.exercises.map((exercise, exerciseIndex) => (
-                  <div
-                    className="exercise"
-                    key={`${exercise.name}-${exerciseIndex}`}
-                  >
-                    <div className="exercise-name">
-                      <span>{exercise.name}</span>
-                      <span className="exercise-time">
-                        {exercise.duration_min
-                          ? `${exercise.duration_min} Min`
-                          : exercise.sets_reps || "Übung"}
-                      </span>
-                    </div>
-
-                    <p>
-                      <strong>Ziel:</strong> {exercise.objective}
-                    </p>
-                    <p>
-                      <strong>Ausführung:</strong> {exercise.how_to}
-                    </p>
-                    <p>
-                      <strong>Material:</strong> {exercise.equipment}
-                    </p>
-                    <p>
-                      <strong>Level:</strong> {exercise.difficulty}
-                    </p>
+      <div className="phase-list">
+        {isTeam
+          ? plan.phases.map((phase, phaseIndex) => (
+              <article
+                className="phase-card"
+                key={`${phase.name}-${phaseIndex}`}
+              >
+                <div className="phase-header">
+                  <div className="phase-title">
+                    <span className="phase-index">
+                      {phaseIndex + 1}
+                    </span>
+                    {phase.name}
                   </div>
-                ))}
-              </div>
-            </article>
-          ))}
-        </div>
 
-        <p className="footer-note">
-          KI-Vorschlag: Bei Schmerzen, Schwindel oder Verletzung die Einheit
-          abbrechen und fachlichen Rat einholen.
-        </p>
+                  <span className="time-chip">
+                    {phase.duration_min} Min
+                  </span>
+                </div>
+
+                <div className="exercise-list">
+                  {phase.exercises.map(
+                    (exercise, exerciseIndex) => (
+                      <div
+                        className="exercise"
+                        key={`${exercise.name}-${exerciseIndex}`}
+                      >
+                        <div className="exercise-name">
+                          <span>{exercise.name}</span>
+                          <span className="exercise-time">
+                            {exercise.duration_min} Min
+                          </span>
+                        </div>
+
+                        <p>Ziel: {exercise.objective}</p>
+                        <p>
+                          Organisation:{" "}
+                          {exercise.organization}
+                        </p>
+                        <p>
+                          Coaching: {exercise.coaching_points}
+                        </p>
+                        <p>Material: {exercise.equipment}</p>
+                      </div>
+                    )
+                  )}
+                </div>
+              </article>
+            ))
+          : plan.blocks.map((block, blockIndex) => (
+              <article
+                className="phase-card"
+                key={`${block.name}-${blockIndex}`}
+              >
+                <div className="phase-header">
+                  <div className="phase-title">
+                    <span className="phase-index">
+                      {blockIndex + 1}
+                    </span>
+                    {block.name}
+                  </div>
+
+                  <span className="time-chip">
+                    {block.duration_min} Min
+                  </span>
+                </div>
+
+                <div className="exercise-list">
+                  {block.exercises.map(
+                    (exercise, exerciseIndex) => (
+                      <div
+                        className="exercise"
+                        key={`${exercise.name}-${exerciseIndex}`}
+                      >
+                        <div className="exercise-name">
+                          <span>{exercise.name}</span>
+
+                          <span className="exercise-time">
+                            {exercise.duration_min != null
+                              ? `${exercise.duration_min} Min`
+                              : exercise.sets_reps || "Übung"}
+                          </span>
+                        </div>
+
+                        {exercise.duration_min != null &&
+                          exercise.sets_reps && (
+                            <p>
+                              Umfang: {exercise.sets_reps}
+                            </p>
+                          )}
+
+                        <p>Ziel: {exercise.objective}</p>
+                        <p>
+                          Ausführung: {exercise.how_to}
+                        </p>
+                        <p>Material: {exercise.equipment}</p>
+                        <p>Level: {exercise.difficulty}</p>
+                      </div>
+                    )
+                  )}
+                </div>
+              </article>
+            ))}
       </div>
-    );
-  }
 
-  return null;
+      <p className="footer-note">
+        KI-Vorschlag: Passe Übungen und Belastung an die
+        Voraussetzungen deiner Spieler an.
+      </p>
+    </div>
+  );
 }

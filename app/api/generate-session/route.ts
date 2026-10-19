@@ -127,7 +127,7 @@ async function callOpenRouterJSON<T>(
         "X-Title": "Football AI Coach",
       },
       body: JSON.stringify({
-        model: "inclusionai/ling-3.0-flash-sante:free",
+        model: "openrouter/free",
         temperature: 0.2,
         messages: [
           { role: "system", content: system },

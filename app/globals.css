@@ -1866,3 +1866,47 @@ select:focus-visible {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.team-player-item + .team-player-item {
+  border-top: 1px solid rgba(187, 255, 205, 0.08);
+}
+
+.player-edit-button {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.player-edit-form {
+  margin: 6px 0 14px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(4, 17, 10, 0.45);
+}
+
+.player-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.player-edit-form .error-box {
+  margin-top: 12px;
+}
+
+.player-edit-button:disabled,
+.player-edit-actions button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+@media (max-width: 540px) {
+  .team-player-item .player-row {
+    flex-wrap: wrap;
+  }
+
+  .player-edit-form .field-grid {
+    grid-template-columns: 1fr;
+  }
+}
